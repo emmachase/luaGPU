@@ -660,28 +660,4 @@ int main(int argc, char **argv) {
     if (g_log) fclose(g_log);
     return 0;
 }
-
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
-
-extern "C" {
-#include "lua.h"
-#include "lauxlib.h"
-#include "lualib.h"
-}
-
-#include "ShaderCompiler.h"
-#include "Compiler.h"
-
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cstdarg>
-#include <string>
-#include <chrono>
-#include <atomic>
-#include <thread>
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
