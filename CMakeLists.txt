@@ -64,6 +64,11 @@ target_link_libraries(host PUBLIC
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 enable_testing()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
-    add_subdirectory(tests)
-endif()
+
+add_executable(test_compiler test/test_compiler.cpp)
+target_link_libraries(test_compiler PRIVATE compiler)
+target_compile_options(test_compiler PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
+)
+add_test(NAME compiler_tests COMMAND test_compiler)

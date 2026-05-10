@@ -60,6 +60,10 @@ struct MonoKeyHash {
     }
 };
 
+// Maps a CallExpr* (within a MonoInstance's body) to the emitted function name
+// to call. Populated by pass4 after monomorphization resolves names.
+using CallNameMap = std::unordered_map<const void *, std::string>;
+
 // ── Monomorphized function instance ───────────────────────────────────────────
 // Fully resolved: param types, return type, and a per-instance ExprTypeMap
 // built by re-running type inference on the body with concrete param bindings.
@@ -72,6 +76,7 @@ struct MonoInstance {
     const Block             *body;           // pointer into shader AST (not owned)
     ExprTypeMap              expr_types;     // type annotation for THIS instantiation
     UnionFind                uf;             // union-find for THIS instantiation
+    CallNameMap              call_names;     // CallExpr* → emitted function name
 };
 
 // ── Compiler result ───────────────────────────────────────────────────────────

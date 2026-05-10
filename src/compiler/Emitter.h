@@ -22,6 +22,7 @@ private:
     // Pointer to the current instance's type map + union-find, set per function.
     const ExprTypeMap *expr_types_ = nullptr;
     UnionFind         *uf_         = nullptr;
+    const CallNameMap *call_names_ = nullptr;
     int                indent_     = 0;
 
     void line(const std::string &s = "");

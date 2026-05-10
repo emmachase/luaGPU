@@ -78,7 +78,7 @@ CompileResult Compiler::compile(const ShaderFunc          &sf,
     pass3_solve(global_ctx);
 
     // ── Semantic validation ────────────────────────────────────────────────
-    validate(sf.body, true);
+    validate(sf.body, false);
 
     if (had_errors_) goto done;
 
@@ -372,7 +372,7 @@ TypeInfo Compiler::type_call(const CallExpr &call, const SrcLoc &loc,
 
 TypeInfo Compiler::type_binop(int op, TypeInfo lhs, TypeInfo rhs,
                                const SrcLoc &loc, TypeCtx &ctx) {
-    if (lhs.tag == GlslType::Unknown || rhs.tag == GlslType::Unknown)
+    if (lhs.is_unknown() || rhs.is_unknown())
         return TypeInfo::unknown();
 
     // Unify type variables with each other or with concrete types
@@ -417,7 +417,7 @@ TypeInfo Compiler::type_binop(int op, TypeInfo lhs, TypeInfo rhs,
 }
 
 TypeInfo Compiler::type_unop(int op, TypeInfo operand, const SrcLoc &loc) {
-    if (operand.tag == GlslType::Unknown) return TypeInfo::unknown();
+    if (operand.is_unknown()) return TypeInfo::unknown();
     if (op == (int)TK::Not) return TypeInfo::make(GlslType::Bool);
     if (op == '-')           return operand;
     emit_error(loc, "unknown unary operator");
@@ -570,7 +570,8 @@ TypeInfo Compiler::typecheck_instance(MonoInstance &inst, SymbolTable &base_sym)
     for (auto &s : *inst.body) {
         if (auto *rs = std::get_if<ReturnStmt>(&s->kind)) {
             if (rs->value) {
-                auto it = inst.expr_types.find(rs->value->get());
+                const Expr *key = rs->value->get();
+                auto it = inst.expr_types.find(key);
                 if (it != inst.expr_types.end()) {
                     ret = it->second;
                     if (ret.is_tvar()) ret = inst.uf.resolve(ret);
@@ -585,12 +586,13 @@ TypeInfo Compiler::typecheck_instance(MonoInstance &inst, SymbolTable &base_sym)
 void Compiler::pass4_monomorphize(const MonoInstance &entry, SymbolTable &base_sym) {
     // DFS over the call graph. Use a work queue of instances whose bodies
     // need to be scanned for callee invocations.
-    std::vector<const MonoInstance *> worklist;
-    worklist.push_back(&entry);
+    std::vector<MonoInstance *> worklist;
+    // entry lives in mono_registry_ — look it up by key to get a mutable ptr.
+    worklist.push_back(&mono_registry_.at(entry.key));
 
     // The entry is already type-checked; scan it for calls.
     while (!worklist.empty()) {
-        const MonoInstance *cur = worklist.back();
+        MonoInstance *cur = worklist.back();
         worklist.pop_back();
 
         // Walk the body looking for calls to local/shaderlib functions.
@@ -651,6 +653,9 @@ void Compiler::pass4_monomorphize(const MonoInstance &entry, SymbolTable &base_s
                             mono_order_.push_back(&it->second);
                             worklist.push_back(&it->second);
                         }
+                        // Record call-site → emitted name in the caller's instance.
+                        const std::string &emitted = mono_registry_.at(key).emitted_name;
+                        cur->call_names[&ek] = emitted;
                     }
 
                     // recurse into args

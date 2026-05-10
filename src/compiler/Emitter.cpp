@@ -124,10 +124,12 @@ void Emitter::emit_instance(const MonoInstance &inst, bool is_entry) {
     // Switch the per-expression context to this instance.
     const ExprTypeMap *prev_et = expr_types_;
     UnionFind         *prev_uf = uf_;
+    const CallNameMap *prev_cn = call_names_;
     expr_types_ = &inst.expr_types;
     // UnionFind is per-instance but we only need resolve(); cast away const
     // because UnionFind::resolve is not const (path compression).
     uf_ = const_cast<UnionFind *>(&inst.uf);
+    call_names_ = &inst.call_names;
 
     std::string name = is_entry ? "shader_main" : inst.emitted_name;
     std::string ret  = type_str(inst.return_type);
@@ -147,6 +149,7 @@ void Emitter::emit_instance(const MonoInstance &inst, bool is_entry) {
 
     expr_types_ = prev_et;
     uf_         = prev_uf;
+    call_names_ = prev_cn;
 }
 
 // ── Block / statement emitter ─────────────────────────────────────────────────
@@ -348,8 +351,15 @@ std::string Emitter::expr_str(const Expr &e) {
                     return "(" + expr_str(*ek.args[0]) + " >> " + expr_str(*ek.args[1]) + ")";
             }
 
-            // Generic call: callee(args)
-            std::string s = expr_str(*ek.callee) + "(";
+            // Generic call: resolve emitted name from call_names_ if available
+            std::string callee_name;
+            if (call_names_) {
+                auto it = call_names_->find(&ek);
+                if (it != call_names_->end()) callee_name = it->second;
+            }
+            if (callee_name.empty()) callee_name = expr_str(*ek.callee);
+
+            std::string s = callee_name + "(";
             for (size_t i = 0; i < ek.args.size(); ++i) {
                 if (i > 0) s += ", ";
                 s += expr_str(*ek.args[i]);
