@@ -19,6 +19,21 @@ TypeInfo Emitter::resolved(const Expr &e) const {
     return TypeInfo::unknown();
 }
 
+// If the expression is a CallExpr with a known emitted name in call_names_,
+// look up the corresponding MonoInstance in mono_order_ and return its return_type.
+// Falls back to TypeInfo::unknown() if not found.
+TypeInfo Emitter::resolved_call_return(const Expr &e) const {
+    if (!call_names_ || !mono_order_) return TypeInfo::unknown();
+    auto *ce = std::get_if<CallExpr>(&e.kind);
+    if (!ce) return TypeInfo::unknown();
+    auto cn_it = call_names_->find(ce);
+    if (cn_it == call_names_->end()) return TypeInfo::unknown();
+    const std::string &emitted = cn_it->second;
+    for (auto *inst : *mono_order_)
+        if (inst->emitted_name == emitted) return inst->return_type;
+    return TypeInfo::unknown();
+}
+
 std::string Emitter::type_str(TypeInfo ti) const {
     if (ti.is_tvar()) ti = uf_->resolve(ti);
     if (ti.tag == GlslType::Struct)
@@ -36,6 +51,7 @@ std::string Emitter::emit(
     const MonoInstance                &entry)
 {
     (void)sf; // ShaderFunc not needed — all info comes from instances
+    mono_order_ = &mono_order;
 
     // 1. Version
     line("#version 330 core");
@@ -71,7 +87,28 @@ std::string Emitter::emit(
         line();
     }
 
-    // 5. Helper function instances (callee-before-caller)
+    // 5. Forward declarations for all helper instances
+    if (!mono_order.empty()) {
+        line("// forward declarations");
+        for (auto *inst : mono_order) {
+            UnionFind *iuf = const_cast<UnionFind *>(&inst->uf);
+            auto res = [&](TypeInfo ti) -> TypeInfo {
+                return ti.is_tvar() ? iuf->resolve(ti) : ti;
+            };
+            std::string sig = type_str(res(inst->return_type)) + " " +
+                              inst->emitted_name + "(";
+            for (size_t i = 0; i < inst->param_names.size(); ++i) {
+                if (i > 0) sig += ", ";
+                sig += type_str(res(inst->param_types[i])) + " " +
+                       inst->param_names[i];
+            }
+            sig += ");";
+            line(sig);
+        }
+        line();
+    }
+
+    // 6. Helper function instances (callee-before-caller)
     if (!mono_order.empty()) {
         line("// helper functions");
         for (auto *inst : mono_order)
@@ -81,11 +118,15 @@ std::string Emitter::emit(
 
     // 6. Forward declaration of shader_main
     {
-        std::string ret = type_str(entry.return_type);
+        UnionFind *entry_uf = const_cast<UnionFind *>(&entry.uf);
+        auto res = [&](TypeInfo ti) -> TypeInfo {
+            return ti.is_tvar() ? entry_uf->resolve(ti) : ti;
+        };
+        std::string ret = type_str(res(entry.return_type));
         std::string sig = ret + " shader_main(";
         for (size_t i = 0; i < entry.param_names.size(); ++i) {
             if (i > 0) sig += ", ";
-            sig += type_str(entry.param_types[i]) + " " + entry.param_names[i];
+            sig += type_str(res(entry.param_types[i])) + " " + entry.param_names[i];
         }
         sig += ");";
         line("// forward declaration");
@@ -132,12 +173,20 @@ void Emitter::emit_instance(const MonoInstance &inst, bool is_entry) {
     call_names_ = &inst.call_names;
 
     std::string name = is_entry ? "shader_main" : inst.emitted_name;
-    std::string ret  = type_str(inst.return_type);
+
+    // Resolve return type and param types through the instance's union-find so
+    // that any type variables unified during typecheck_instance become concrete.
+    auto resolve_ti = [&](TypeInfo ti) -> TypeInfo {
+        if (ti.is_tvar()) return uf_->resolve(ti);
+        return ti;
+    };
+
+    std::string ret  = type_str(resolve_ti(inst.return_type));
 
     std::string sig = ret + " " + name + "(";
     for (size_t i = 0; i < inst.param_names.size(); ++i) {
         if (i > 0) sig += ", ";
-        sig += type_str(inst.param_types[i]) + " " + inst.param_names[i];
+        sig += type_str(resolve_ti(inst.param_types[i])) + " " + inst.param_names[i];
     }
     sig += ") {";
     line(sig);
@@ -169,9 +218,29 @@ void Emitter::emit_stmt(const Stmt &s) {
         if constexpr (std::is_same_v<T, LocalStmt>) {
             TypeInfo ty = TypeInfo::make(GlslType::Float);
             if (sk.init) {
-                ty = resolved(**sk.init);
-                if (ty.is_tvar()) ty = uf_->resolve(ty);
-                if (ty.tag == GlslType::Unknown) ty = TypeInfo::make(GlslType::Float);
+                // If the initialiser is a numeric or bool literal, its type is
+                // authoritative — do not let downstream unification widen it to a
+                // vector type (e.g. `local t = 0.0` must stay float even when t
+                // is later used in `rd * t` which would otherwise unify t as vec3).
+                const Expr &init_expr = **sk.init;
+                bool is_literal = std::holds_alternative<NumberLit>(init_expr.kind) ||
+                                  std::holds_alternative<BoolLit>(init_expr.kind);
+                if (is_literal) {
+                    // Numeric literals are polymorphic tvars in the type system
+                    // (to allow `vec2 * 2.0`), but as a local variable declaration
+                    // the declared type should always be the narrow scalar type,
+                    // not whatever the tvar was widened to by downstream uses.
+                    if (std::holds_alternative<BoolLit>(init_expr.kind))
+                        ty = TypeInfo::make(GlslType::Bool);
+                    else
+                        ty = TypeInfo::make(GlslType::Float);
+                } else {
+                    ty = resolved(init_expr);
+                    if (ty.is_tvar()) ty = uf_->resolve(ty);
+                    if (ty.tag == GlslType::Unknown)
+                        ty = resolved_call_return(init_expr);
+                    if (ty.tag == GlslType::Unknown) ty = TypeInfo::make(GlslType::Float);
+                }
             }
             std::string decl = type_str(ty) + " " + sk.name;
             if (sk.init) decl += " = " + expr_str(**sk.init);
@@ -230,6 +299,21 @@ void Emitter::emit_stmt(const Stmt &s) {
             line("break;");
         }
     }, s.kind);
+}
+
+// ── Broadcast helper ─────────────────────────────────────────────────────────
+// Emit expr e, wrapping it in vecN(...) if e resolves to a float scalar but
+// vec_type is a float vector.  Used for genType builtins (pow, clamp, mix…).
+std::string Emitter::expr_str_broadcast(const Expr &e, GlslType vec_type) {
+    std::string s = expr_str(e);
+    if (!is_float_vec(vec_type)) return s;
+    TypeInfo ty = resolved(e);
+    if (ty.is_tvar()) ty = uf_->resolve(ty);
+    // Only promote plain float scalars (not already a vector or unknown).
+    if (ty.tag == GlslType::Float) {
+        s = std::string(glsl_type_name(vec_type)) + "(" + s + ")";
+    }
+    return s;
 }
 
 // ── Expression emitter ────────────────────────────────────────────────────────
@@ -359,10 +443,39 @@ std::string Emitter::expr_str(const Expr &e) {
             }
             if (callee_name.empty()) callee_name = expr_str(*ek.callee);
 
+            // genType builtins that require all args to be the same vector type.
+            // If any arg is a float vector and another is a plain float scalar,
+            // promote the scalar to vecN(x).
+            static const char *gentype_builtins[] = {
+                "pow", "clamp", "mix", "smoothstep", "step", "min", "max",
+                "mod", "fma", nullptr
+            };
+            bool is_gentype = false;
+            for (int gi = 0; gentype_builtins[gi]; ++gi) {
+                if (callee_name == gentype_builtins[gi]) { is_gentype = true; break; }
+            }
+
+            // Find the widest float-vector type among the args (if any).
+            GlslType vec_type = GlslType::Unknown;
+            if (is_gentype) {
+                for (auto &a : ek.args) {
+                    TypeInfo at = resolved(*a);
+                    if (at.is_tvar()) at = uf_->resolve(at);
+                    if (is_float_vec(at.tag)) {
+                        if (vec_type == GlslType::Unknown ||
+                            vec_dim(at.tag) > vec_dim(vec_type))
+                            vec_type = at.tag;
+                    }
+                }
+            }
+
             std::string s = callee_name + "(";
             for (size_t i = 0; i < ek.args.size(); ++i) {
                 if (i > 0) s += ", ";
-                s += expr_str(*ek.args[i]);
+                if (is_gentype && is_float_vec(vec_type))
+                    s += expr_str_broadcast(*ek.args[i], vec_type);
+                else
+                    s += expr_str(*ek.args[i]);
             }
             return s + ")";
 

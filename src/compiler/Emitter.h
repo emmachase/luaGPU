@@ -23,6 +23,8 @@ private:
     const ExprTypeMap *expr_types_ = nullptr;
     UnionFind         *uf_         = nullptr;
     const CallNameMap *call_names_ = nullptr;
+    // All helper instances (for return-type lookup when local init type is Unknown).
+    const std::vector<MonoInstance *> *mono_order_ = nullptr;
     int                indent_     = 0;
 
     void line(const std::string &s = "");
@@ -36,7 +38,11 @@ private:
     void emit_stmt (const Stmt  &s);
 
     std::string expr_str(const Expr &e);
+    // Emit an expression, promoting float scalars to `vecN(x)` when vec_type
+    // is a vector type.  Used for genType builtins like pow/clamp/mix.
+    std::string expr_str_broadcast(const Expr &e, GlslType vec_type);
     TypeInfo    resolved(const Expr &e) const;
+    TypeInfo    resolved_call_return(const Expr &e) const; // looks up mono_order_ by emitted name
     std::string type_str(TypeInfo ti)   const;
 
     std::string indent_str() const { return std::string(indent_ * 4, ' '); }

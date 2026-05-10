@@ -236,7 +236,13 @@ TypeInfo Compiler::type_expr(const Expr &e, SymbolTable &sym, TypeCtx &ctx) {
         using T = std::decay_t<decltype(ek)>;
 
         if constexpr (std::is_same_v<T, NumberLit>) {
+            // Numeric literals are float scalars.  We give them a tvar so they
+            // can participate in operations like `vec2 * 2.0` (GLSL allows scalar
+            // broadcast in arithmetic), but we constrain the tvar to Float
+            // immediately so it cannot be widened to a vector type by unification.
             int id = ctx.uf.new_tvar();
+            TypeInfo existing;
+            ctx.uf.constrain(id, TypeInfo::make(GlslType::Float), existing);
             return TypeInfo::make_tvar(id);
 
         } else if constexpr (std::is_same_v<T, BoolLit>) {
@@ -256,6 +262,10 @@ TypeInfo Compiler::type_expr(const Expr &e, SymbolTable &sym, TypeCtx &ctx) {
 
         } else if constexpr (std::is_same_v<T, FieldExpr>) {
             TypeInfo base = type_expr(*ek.base, sym, ctx);
+            // If the base type is not yet resolved (result of a polymorphic
+            // local call), defer — monomorphization will resolve it.
+            if (base.is_unknown() || base.is_tvar())
+                return TypeInfo::unknown();
             if (is_vec(base.tag))
                 return type_swizzle(base, ek.field, e.loc);
             if (base.tag == GlslType::Struct) {
@@ -330,7 +340,28 @@ TypeInfo Compiler::type_call(const CallExpr &call, const SrcLoc &loc,
             return arg_types.empty() ? TypeInfo::unknown() : arg_types[0];
         }
         if (b->kind == BindingKind::Function) {
-            // Polymorphic local — return Unknown; concrete type resolved per-instance in pass 4.
+            // Polymorphic local — look up an already-resolved MonoInstance.
+            // First try an exact key match.
+            MonoKey probe;
+            probe.func_name = ne->name;
+            probe.arg_types = arg_types;
+            auto it = mono_registry_.find(probe);
+            if (it != mono_registry_.end() &&
+                it->second.return_type.tag != GlslType::Unknown)
+                return it->second.return_type;
+
+            // Fallback: find any instance of this function whose param_types are
+            // all concrete and whose return_type is known.  This handles the case
+            // where the registry key still has Unknown slots (from the first scan)
+            // but param_types have since been updated by the refinement pass.
+            for (auto &[k, m] : mono_registry_) {
+                if (k.func_name != ne->name) continue;
+                if (m.return_type.tag == GlslType::Unknown) continue;
+                bool all_conc = true;
+                for (auto &pt : m.param_types)
+                    if (pt.is_unknown() || pt.is_tvar()) { all_conc = false; break; }
+                if (all_conc) return m.return_type;
+            }
             return TypeInfo::unknown();
         }
     }
@@ -707,4 +738,177 @@ void Compiler::pass4_monomorphize(const MonoInstance &entry, SymbolTable &base_s
 
         scan_block(*cur->body);
     }
+
+    // ── Refinement pass ───────────────────────────────────────────────────────
+    // The first scan registered instances with arg types collected before callee
+    // return types were known (so some params were Unknown).  Now that all
+    // instances are in mono_registry_, type_call can look up return types.
+    // We iterate to fixed-point: each round typecheck all instances (callee-
+    // first), then rescan every body to push newly-concrete arg types into
+    // callee param_types.  Convergence is guaranteed because we only ever move
+    // Unknown → concrete, never the reverse.
+    std::vector<MonoInstance *> all_insts = mono_order_;
+    all_insts.push_back(&mono_registry_.at(entry.key));
+
+    // Fixed-point iteration: typecheck → rescan → repeat until no param_type
+    // changes.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+
+        for (MonoInstance *inst : all_insts) {
+            inst->expr_types.clear();
+            inst->uf = UnionFind{};
+            inst->return_type = typecheck_instance(*inst, base_sym);
+        }
+
+        // Rescan every instance and propagate concrete arg types into callees.
+        // Record whether any param_type was updated.
+        for (MonoInstance *inst : all_insts) {
+            // Snapshot current param_types for all instances before rescan.
+            // We detect changes by comparing before/after inside the rescan lambda.
+            // Simpler: pass a flag by reference into rescan_expr.
+            std::function<void(MonoInstance &, const Expr &)> rescan_expr_chk;
+            std::function<void(MonoInstance &, const Block &)> rescan_block_chk;
+
+            rescan_expr_chk = [&](MonoInstance &inst2, const Expr &e) {
+                std::visit([&](auto &ek) {
+                    using T = std::decay_t<decltype(ek)>;
+                    if constexpr (std::is_same_v<T, CallExpr>) {
+                        std::vector<TypeInfo> arg_types;
+                        for (auto &a : ek.args) {
+                            TypeInfo ty;
+                            auto it = inst2.expr_types.find(a.get());
+                            ty = (it != inst2.expr_types.end()) ? it->second
+                                                                 : TypeInfo::unknown();
+                            if (ty.is_tvar()) ty = inst2.uf.resolve(ty);
+                            arg_types.push_back(ty);
+                        }
+
+                        MonoKey key;
+                        const FuncSig *sig = nullptr;
+                        if (auto *ne = std::get_if<NameExpr>(&ek.callee->kind)) {
+                            const Binding *b = base_sym.lookup(ne->name);
+                            if (b && b->kind == BindingKind::Function) {
+                                key.func_name = ne->name;
+                                sig = find_sig(ne->name, "");
+                            }
+                        }
+
+                        if (sig && !key.func_name.empty()) {
+                            for (auto &[k, m] : mono_registry_) {
+                                if (k.func_name != key.func_name) continue;
+                                if (k.arg_types.size() != arg_types.size()) continue;
+                                for (size_t i = 0; i < arg_types.size(); ++i) {
+                                    if (!arg_types[i].is_unknown() &&
+                                        (m.param_types[i].is_unknown() ||
+                                         m.param_types[i].is_tvar())) {
+                                        const_cast<MonoInstance &>(m).param_types[i] =
+                                            arg_types[i];
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        for (auto &a : ek.args) rescan_expr_chk(inst2, *a);
+                    } else {
+                        if constexpr (std::is_same_v<T, BinaryExpr>) {
+                            rescan_expr_chk(inst2, *ek.left);
+                            rescan_expr_chk(inst2, *ek.right);
+                        } else if constexpr (std::is_same_v<T, UnaryExpr>) {
+                            rescan_expr_chk(inst2, *ek.operand);
+                        } else if constexpr (std::is_same_v<T, FieldExpr>) {
+                            rescan_expr_chk(inst2, *ek.base);
+                        } else if constexpr (std::is_same_v<T, TableExpr>) {
+                            for (auto &f : ek.fields) rescan_expr_chk(inst2, *f.value);
+                        }
+                    }
+                }, e.kind);
+            };
+
+            rescan_block_chk = [&](MonoInstance &inst2, const Block &bl) {
+                for (auto &s : bl) {
+                    std::visit([&](auto &sk) {
+                        using T = std::decay_t<decltype(sk)>;
+                        if constexpr (std::is_same_v<T, LocalStmt>)
+                            { if (sk.init) rescan_expr_chk(inst2, **sk.init); }
+                        else if constexpr (std::is_same_v<T, AssignStmt>)
+                            rescan_expr_chk(inst2, *sk.value);
+                        else if constexpr (std::is_same_v<T, ExprStmt>)
+                            rescan_expr_chk(inst2, *sk.expr);
+                        else if constexpr (std::is_same_v<T, ReturnStmt>)
+                            { if (sk.value) rescan_expr_chk(inst2, **sk.value); }
+                        else if constexpr (std::is_same_v<T, IfStmt>)
+                            for (auto &br : sk.branches) {
+                                if (br.cond) rescan_expr_chk(inst2, *br.cond);
+                                rescan_block_chk(inst2, br.body);
+                            }
+                        else if constexpr (std::is_same_v<T, WhileStmt>)
+                            { rescan_expr_chk(inst2, *sk.cond);
+                              rescan_block_chk(inst2, sk.body); }
+                        else if constexpr (std::is_same_v<T, ForStmt>) {
+                            rescan_expr_chk(inst2, *sk.start);
+                            rescan_expr_chk(inst2, *sk.stop);
+                            if (sk.step) rescan_expr_chk(inst2, **sk.step);
+                            rescan_block_chk(inst2, sk.body);
+                        }
+                    }, s->kind);
+                }
+            };
+
+            rescan_block_chk(*inst, *inst->body);
+        }
+    }
+
+    // One final typecheck so expr_types reflect the fully-resolved param_types.
+    for (MonoInstance *inst : all_insts) {
+        inst->expr_types.clear();
+        inst->uf = UnionFind{};
+        inst->return_type = typecheck_instance(*inst, base_sym);
+    }
+
+    // ── Deduplication ─────────────────────────────────────────────────────────
+    // "scene_4"), and a later scan created a concrete instance of the same
+    // function (e.g. "scene_vec3"), the Unknown instance is now redundant.
+    // Redirect every call_names reference from the Unknown instance's emitted
+    // name to the concrete instance's emitted name, then drop the Unknown
+    // instance from mono_order_ so the emitter never sees it.
+    std::vector<MonoInstance *> to_remove;
+    for (MonoInstance *inst : mono_order_) {
+        // Check if any param is still Unknown/tvar.
+        bool has_unknown = false;
+        for (auto &pt : inst->param_types)
+            if (pt.is_unknown() || (pt.is_tvar() &&
+                inst->uf.resolve(pt).tag == GlslType::Unknown))
+                { has_unknown = true; break; }
+        if (!has_unknown) continue;
+
+        // Look for a concrete sibling: same func_name, all-concrete param_types.
+        MonoInstance *concrete = nullptr;
+        for (auto &[k, m] : mono_registry_) {
+            if (k.func_name != inst->key.func_name) continue;
+            if (k.arg_types.size() != inst->key.arg_types.size()) continue;
+            if (&m == inst) continue;
+            bool all_conc = true;
+            for (auto &pt : m.param_types)
+                if (pt.is_unknown() || pt.is_tvar()) { all_conc = false; break; }
+            if (all_conc) { concrete = const_cast<MonoInstance *>(&m); break; }
+        }
+        if (!concrete) continue;
+
+        // Rewrite call_names in every instance: old emitted name → new.
+        const std::string &old_name = inst->emitted_name;
+        const std::string &new_name = concrete->emitted_name;
+        for (auto &[k, m] : mono_registry_)
+            for (auto &[ce, nm] : const_cast<MonoInstance &>(m).call_names)
+                if (nm == old_name) nm = new_name;
+        // Also fix the entry's call_names.
+        for (auto &[ce, nm] : const_cast<MonoInstance &>(mono_registry_.at(entry.key)).call_names)
+            if (nm == old_name) nm = new_name;
+
+        to_remove.push_back(inst);
+    }
+    for (MonoInstance *inst : to_remove)
+        mono_order_.erase(std::remove(mono_order_.begin(), mono_order_.end(), inst),
+                          mono_order_.end());
 }

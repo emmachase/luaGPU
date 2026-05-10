@@ -8,11 +8,28 @@ static int tk_int(TK k) { return static_cast<int>(k); }
 ShaderFunc Parser::parse(std::string_view source, std::string src_name) {
     Parser p(source, src_name);
 
-    // The source we receive is the body of the outer closure, i.e.:
-    //   function(u_time, u_resolution)
-    //       ...
-    //   end
-    // We expect to see exactly that.
+    // Accept either of two top-level forms:
+    //
+    //   Form A (bare, used in tests):
+    //     function(u_time, u_resolution)
+    //         ...
+    //     end
+    //
+    //   Form B (full Lua file, used in example .lua files):
+    //     local <name> = shader(function(u_time, u_resolution)
+    //         ...
+    //     end)
+    //
+    // Detect Form B by peeking for 'local'.
+    bool wrapped = false;
+    if (p.check(TK::Local)) {
+        p.consume();                                      // 'local'
+        p.expect(TK::Name, "shader variable name");       // <name>
+        p.expect(TK{(int)'='}, "'='");
+        p.expect(TK::Name, "'shader'");                   // 'shader'
+        p.expect(TK{(int)'('}, "'('");
+        wrapped = true;
+    }
 
     p.expect(TK::Function, "'function'");
 
@@ -29,6 +46,9 @@ ShaderFunc Parser::parse(std::string_view source, std::string src_name) {
 
     Block body = p.parse_block();
     p.expect(TK::End, "'end'");
+
+    if (wrapped)
+        p.expect(TK{(int)')'}, "')'");  // closing ')' of shader(...)
 
     if (!p.check(TK::Eof))
         p.error("unexpected token after outer function");

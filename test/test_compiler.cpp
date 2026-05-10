@@ -5,6 +5,8 @@
 #include "../src/compiler/Parser.h"
 #include "../src/compiler/Compiler.h"
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <functional>
@@ -36,11 +38,27 @@ static void check(bool cond, const char *expr, const char *file, int line) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// Read a whole file into a string. Returns empty string on failure.
+static std::string read_file(const char *path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
 // Compile Lua source with no uniforms; return CompileResult.
 static CompileResult compile_src(std::string_view src, const char *name = "test") {
-    ShaderFunc sf = Parser::parse(src, name);
-    Compiler   c;
-    return c.compile(sf, {});
+    try {
+        ShaderFunc sf = Parser::parse(src, name);
+        Compiler   c;
+        return c.compile(sf, {});
+    } catch (const std::exception &ex) {
+        CompileResult r;
+        r.ok = false;
+        r.errors.push_back({SrcLoc{name, 0}, std::string("exception: ") + ex.what()});
+        return r;
+    }
 }
 
 // Compile and assert it succeeds; return GLSL string.
@@ -347,6 +365,46 @@ end
     CHECK(p_fade < p_main);
 }
 
+// ── example shader file tests ─────────────────────────────────────────────────
+// These tests read the .lua files from the examples/ directory relative to the
+// repo root (i.e. the working directory when the test binary is run via ctest
+// or directly from the build dir with --test-dir set to the repo root).
+
+static void test_example_plasma() {
+    std::string src = read_file("examples/plasma.lua");
+    CHECK(!src.empty());
+    if (src.empty()) return;
+    compile_ok(src, "plasma");
+}
+
+static void test_example_mandelbrot() {
+    std::string src = read_file("examples/mandelbrot.lua");
+    CHECK(!src.empty());
+    if (src.empty()) return;
+    compile_ok(src, "mandelbrot");
+}
+
+static void test_example_raymarcher() {
+    std::string src = read_file("examples/raymarcher.lua");
+    CHECK(!src.empty());
+    if (src.empty()) return;
+    compile_ok(src, "raymarcher");
+}
+
+static void test_example_voronoi() {
+    std::string src = read_file("examples/voronoi.lua");
+    CHECK(!src.empty());
+    if (src.empty()) return;
+    compile_ok(src, "voronoi");
+}
+
+static void test_example_fbm_landscape() {
+    std::string src = read_file("examples/fbm_landscape.lua");
+    CHECK(!src.empty());
+    if (src.empty()) return;
+    compile_ok(src, "fbm_landscape");
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 int main() {
     struct Test { const char *name; std::function<void()> fn; };
@@ -365,8 +423,13 @@ int main() {
         {"mod_operator_float",  test_mod_operator_float},
         {"ne_operator",         test_ne_operator},
         {"error_type_mismatch", test_error_type_mismatch},
-        {"error_concat_rejected",test_error_concat_rejected},
-        {"spec_fade_shader",    test_spec_fade_shader},
+        {"error_concat_rejected", test_error_concat_rejected},
+        {"spec_fade_shader",      test_spec_fade_shader},
+        {"example_plasma",        test_example_plasma},
+        {"example_mandelbrot",    test_example_mandelbrot},
+        {"example_raymarcher",    test_example_raymarcher},
+        {"example_voronoi",       test_example_voronoi},
+        {"example_fbm_landscape", test_example_fbm_landscape},
     };
 
     for (auto &t : tests) {

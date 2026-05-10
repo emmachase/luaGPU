@@ -72,3 +72,11 @@ target_compile_options(test_compiler PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
 )
 add_test(NAME compiler_tests COMMAND test_compiler)
+
+# ── Tools ──────────────────────────────────────────────────────────────────────
+add_executable(emit_examples tools/emit_examples.cpp)
+target_link_libraries(emit_examples PRIVATE compiler)
+target_compile_options(emit_examples PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
+)
