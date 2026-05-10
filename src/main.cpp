@@ -4,7 +4,8 @@
 // Opens a GLFW window, runs the given .lua file through LuaJIT which calls
 // shader() to compile GLSL, then renders a fullscreen quad at 60 fps with
 // u_time / u_delta / u_resolution / u_mouse uniforms updated each frame.
-// Press R to reload the shader from disk. Press Escape or close the window to quit.
+// The shader file is watched for changes and reloaded automatically.
+// Press R to force-reload. Press Escape or close the window to quit.
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -24,6 +25,11 @@ extern "C" {
 #include <cstdarg>
 #include <string>
 #include <chrono>
+#include <atomic>
+#include <thread>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 // ── Fullscreen quad ────────────────────────────────────────────────────────────
 
@@ -138,7 +144,7 @@ static ShaderHandle *load_shader_from_lua(lua_State *L, const std::string &lua_p
 
 // ── GLFW callbacks ─────────────────────────────────────────────────────────────
 
-static bool g_reload_requested = false;
+static std::atomic<bool> g_reload_requested { false };
 static double g_mouse_x = 0.0, g_mouse_y = 0.0;
 static int    g_win_w = 0, g_win_h = 0;
 
@@ -147,7 +153,7 @@ static void key_cb(GLFWwindow *win, int key, int /*sc*/, int action, int /*mod*/
         if (key == GLFW_KEY_ESCAPE)
             glfwSetWindowShouldClose(win, GLFW_TRUE);
         if (key == GLFW_KEY_R)
-            g_reload_requested = true;
+            g_reload_requested.store(true, std::memory_order_relaxed);
     }
 }
 
@@ -159,6 +165,86 @@ static void cursor_cb(GLFWwindow * /*win*/, double x, double y) {
 static void framebuffer_size_cb(GLFWwindow * /*win*/, int w, int h) {
     g_win_w = w; g_win_h = h;
     glViewport(0, 0, w, h);
+}
+
+// ── File watcher ───────────────────────────────────────────────────────────────
+// Background thread that watches the shader file's directory for any write
+// and sets g_reload_requested.  Uses ReadDirectoryChangesW so it wakes
+// immediately rather than polling.
+
+static std::atomic<bool> g_watcher_stop { false };
+
+static void watcher_thread(std::string watch_dir, std::string watch_file) {
+    // watch_file is just the filename part (no directory).
+    HANDLE hDir = CreateFileA(
+        watch_dir.c_str(),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        nullptr);
+
+    if (hDir == INVALID_HANDLE_VALUE) return;
+
+    OVERLAPPED ov = {};
+    ov.hEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+    alignas(DWORD) char buf[4096];
+
+    while (!g_watcher_stop.load(std::memory_order_relaxed)) {
+        ResetEvent(ov.hEvent);
+        DWORD bytes = 0;
+        if (!ReadDirectoryChangesW(
+                hDir,
+                buf, sizeof(buf),
+                FALSE,   // not recursive
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
+                &bytes,
+                &ov,
+                nullptr)) {
+            break;
+        }
+
+        // Wait for either a change or the stop signal (check every 200 ms).
+        while (!g_watcher_stop.load(std::memory_order_relaxed)) {
+            DWORD wait = WaitForSingleObject(ov.hEvent, 200);
+            if (wait == WAIT_OBJECT_0) break;
+        }
+        if (g_watcher_stop.load(std::memory_order_relaxed)) break;
+
+        // Decode the change records and check if our file was modified.
+        if (!GetOverlappedResult(hDir, &ov, &bytes, FALSE) || bytes == 0) continue;
+
+        FILE_NOTIFY_INFORMATION *info =
+            reinterpret_cast<FILE_NOTIFY_INFORMATION *>(buf);
+        bool matched = false;
+        for (;;) {
+            if (info->Action == FILE_ACTION_MODIFIED ||
+                info->Action == FILE_ACTION_ADDED    ||
+                info->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                // Convert wide filename to narrow for comparison.
+                char narrow[MAX_PATH] = {};
+                WideCharToMultiByte(CP_UTF8, 0,
+                    info->FileName,
+                    static_cast<int>(info->FileNameLength / sizeof(WCHAR)),
+                    narrow, MAX_PATH - 1, nullptr, nullptr);
+                if (_stricmp(narrow, watch_file.c_str()) == 0) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!info->NextEntryOffset) break;
+            info = reinterpret_cast<FILE_NOTIFY_INFORMATION *>(
+                reinterpret_cast<char *>(info) + info->NextEntryOffset);
+        }
+
+        if (matched)
+            g_reload_requested.store(true, std::memory_order_relaxed);
+    }
+
+    CloseHandle(ov.hEvent);
+    CloseHandle(hDir);
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -277,6 +363,22 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // ── File watcher thread ────────────────────────────────────────────────────
+    // Split lua_path into directory and filename parts.
+    std::string watch_dir, watch_file;
+    {
+        size_t slash = lua_path.find_last_of("/\\");
+        if (slash == std::string::npos) {
+            watch_dir  = ".";
+            watch_file = lua_path;
+        } else {
+            watch_dir  = lua_path.substr(0, slash);
+            watch_file = lua_path.substr(slash + 1);
+        }
+    }
+    std::thread watcher(watcher_thread, watch_dir, watch_file);
+    log("[luaGPU] watching %s for changes\n", lua_path.c_str());
+
     // ── Render loop ────────────────────────────────────────────────────────────
     using Clock = std::chrono::steady_clock;
     auto t0      = Clock::now();
@@ -285,8 +387,8 @@ int main(int argc, char **argv) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        if (g_reload_requested) {
-            g_reload_requested = false;
+        if (g_reload_requested.load(std::memory_order_relaxed)) {
+            g_reload_requested.store(false, std::memory_order_relaxed);
             // Fresh Lua state on reload so stale globals don't bleed through.
             lua_close(L);
             L = luaL_newstate();
@@ -332,6 +434,8 @@ int main(int argc, char **argv) {
     }
 
     // ── Cleanup ────────────────────────────────────────────────────────────────
+    g_watcher_stop.store(true, std::memory_order_relaxed);
+    watcher.join();
     if (prog) glDeleteProgram(prog);
     glDeleteBuffers(1, &g_vbo);
     glDeleteVertexArrays(1, &g_vao);
