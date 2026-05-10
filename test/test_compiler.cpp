@@ -405,6 +405,112 @@ static void test_example_fbm_landscape() {
     compile_ok(src, "fbm_landscape");
 }
 
+// ── named struct tests ────────────────────────────────────────────────────────
+
+static void test_named_struct_basic() {
+    // Named struct declared and used as constructor.
+    const char *src = R"(
+function(u_time, u_resolution)
+    local Ray = struct({ origin = vec3, dir = vec3 })
+    local function make_ray(o, d)
+        return Ray { origin = o, dir = d }
+    end
+    return function main(uv)
+        local r = make_ray(vec3(0.0, 0.0, 0.0), vec3(uv.x, uv.y, 1.0))
+        return vec4(r.origin, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "named_struct_basic");
+
+    // Named struct should be emitted with user name, not S0.
+    CHECK_CONTAINS(glsl, "struct Ray {");
+    CHECK_CONTAINS(glsl, "vec3 origin;");
+    CHECK_CONTAINS(glsl, "vec3 dir;");
+    // The anonymous S0 name should NOT appear.
+    CHECK_NOT_CONTAINS(glsl, "struct S0");
+    // Constructor should use the type name.
+    CHECK_CONTAINS(glsl, "Ray(");
+}
+
+static void test_named_struct_nested() {
+    // Hit struct has a field of type Ray (nested named struct).
+    const char *src = R"(
+function(u_time, u_resolution)
+    local Ray = struct({ origin = vec3, dir = vec3 })
+    local Hit = struct({ t = float, pos = vec3, ray = Ray })
+    local function make_hit(t, p, r)
+        return Hit { t = t, pos = p, ray = r }
+    end
+    return function main(uv)
+        local r = Ray { origin = vec3(0.0, 0.0, 0.0), dir = vec3(uv.x, uv.y, 1.0) }
+        local h = make_hit(1.0, vec3(0.0, 0.0, 0.0), r)
+        return vec4(h.pos, h.t)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "named_struct_nested");
+
+    CHECK_CONTAINS(glsl, "struct Ray {");
+    CHECK_CONTAINS(glsl, "struct Hit {");
+    // Ray must be declared before Hit (dependency order).
+    auto ray_pos = glsl.find("struct Ray {");
+    auto hit_pos = glsl.find("struct Hit {");
+    CHECK(ray_pos != std::string::npos && hit_pos != std::string::npos && ray_pos < hit_pos);
+    // Hit should have a Ray-typed field.
+    CHECK_CONTAINS(glsl, "Ray ray;");
+}
+
+static void test_named_struct_mixed_anonymous() {
+    // Named structs and anonymous structs can coexist.
+    const char *src = R"(
+function(u_time, u_resolution)
+    local Ray = struct({ origin = vec3, dir = vec3 })
+    return function main(uv)
+        local r = Ray { origin = vec3(0.0, 0.0, 0.0), dir = vec3(0.0, 0.0, 1.0) }
+        -- anonymous struct
+        local anon = { x = uv.x, y = uv.y }
+        return vec4(r.dir.x, anon.x, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "named_struct_mixed");
+
+    CHECK_CONTAINS(glsl, "struct Ray {");
+    // Anonymous struct gets a generated name.
+    CHECK_CONTAINS(glsl, "struct S0 {");
+}
+
+static void test_named_struct_error_unknown_field() {
+    // Using an unknown field in a named struct constructor is an error.
+    const char *src = R"(
+function(u_time, u_resolution)
+    local Ray = struct({ origin = vec3, dir = vec3 })
+    return function main(uv)
+        local r = Ray { origin = vec3(0.0, 0.0, 0.0), badfield = 1.0 }
+        return vec4(r.origin, 1.0)
+    end
+end
+)";
+    auto msg = compile_fail(src, "named_struct_bad_field");
+    CHECK(msg.find("no field 'badfield'") != std::string::npos);
+}
+
+static void test_named_struct_error_missing_field() {
+    // Missing a required field in a named struct constructor is an error.
+    const char *src = R"(
+function(u_time, u_resolution)
+    local Ray = struct({ origin = vec3, dir = vec3 })
+    return function main(uv)
+        local r = Ray { origin = vec3(0.0, 0.0, 0.0) }
+        return vec4(r.origin, 1.0)
+    end
+end
+)";
+    auto msg = compile_fail(src, "named_struct_missing_field");
+    CHECK(msg.find("missing field 'dir'") != std::string::npos);
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 int main() {
     struct Test { const char *name; std::function<void()> fn; };
@@ -430,6 +536,11 @@ int main() {
         {"example_raymarcher",    test_example_raymarcher},
         {"example_voronoi",       test_example_voronoi},
         {"example_fbm_landscape", test_example_fbm_landscape},
+        {"named_struct_basic",           test_named_struct_basic},
+        {"named_struct_nested",          test_named_struct_nested},
+        {"named_struct_mixed_anonymous", test_named_struct_mixed_anonymous},
+        {"named_struct_error_unknown_field",  test_named_struct_error_unknown_field},
+        {"named_struct_error_missing_field",  test_named_struct_error_missing_field},
     };
 
     for (auto &t : tests) {

@@ -36,8 +36,15 @@ TypeInfo Emitter::resolved_call_return(const Expr &e) const {
 
 std::string Emitter::type_str(TypeInfo ti) const {
     if (ti.is_tvar()) ti = uf_->resolve(ti);
-    if (ti.tag == GlslType::Struct)
+    if (ti.tag == GlslType::Struct) {
+        // Look up glsl_name from the struct definitions (handles named structs).
+        if (structs_) {
+            for (auto &sd : *structs_)
+                if (sd.id == ti.struct_id) return sd.glsl_name;
+        }
+        // Fallback (should not happen after pass5).
         return "S" + std::to_string(ti.struct_id);
+    }
     return glsl_type_name(ti.tag);
 }
 
@@ -52,6 +59,7 @@ std::string Emitter::emit(
 {
     (void)sf; // ShaderFunc not needed — all info comes from instances
     mono_order_ = &mono_order;
+    structs_    = &structs;
 
     // 1. Version
     line("#version 330 core");
@@ -297,6 +305,11 @@ void Emitter::emit_stmt(const Stmt &s) {
 
         } else if constexpr (std::is_same_v<T, BreakStmt>) {
             line("break;");
+
+        } else if constexpr (std::is_same_v<T, StructDeclStmt>) {
+            // Named struct declarations are emitted in the struct definitions
+            // section before all functions — nothing to emit here.
+            (void)sk;
         }
     }, s.kind);
 }

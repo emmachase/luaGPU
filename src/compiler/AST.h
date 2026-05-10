@@ -150,6 +150,14 @@ struct ForStmt {
 // break
 struct BreakStmt {};
 
+// local Ray = struct({ origin = vec3, dir = vec3 })
+// Represents a named struct declaration. field_types maps field name → type name string
+// (e.g. "vec3", "float", or another named struct name).
+struct StructDeclStmt {
+    std::string name;                               // e.g. "Ray"
+    std::vector<std::pair<std::string,std::string>> fields; // { {"origin","vec3"}, ... }
+};
+
 using StmtKind = std::variant<
     LocalStmt,
     LocalFuncStmt,
@@ -159,7 +167,8 @@ using StmtKind = std::variant<
     IfStmt,
     WhileStmt,
     ForStmt,
-    BreakStmt
+    BreakStmt,
+    StructDeclStmt
 >;
 
 struct Stmt {

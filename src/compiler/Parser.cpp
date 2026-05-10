@@ -163,6 +163,56 @@ StmtPtr Parser::parse_local() {
     }
 
     Token name = expect(TK::Name, "variable name");
+
+    // Detect: local <Name> = struct({ field = TypeName, ... })
+    // We peek ahead: if the next token is '=' and the token after is 'struct' (a Name)
+    // followed by '(', treat this as a named struct declaration.
+    if (check(TK{(int)'='}) && name.str_val != "struct") {
+        // Save position: peek two tokens to see if rhs is struct(...)
+        // We use a simple approach: consume '=', check if name token == "struct"
+        Token eq = consume(); // '='
+        (void)eq;
+
+        if (check(TK::Name) && peek().str_val == "struct") {
+            Token struct_tok = consume(); // 'struct'
+            (void)struct_tok;
+            if (check(TK{(int)'('})) {
+                consume(); // '('
+                expect(TK{(int)'{'}, "'{'");
+
+                StructDeclStmt sd;
+                sd.name = name.str_val;
+
+                // Parse field = TypeName pairs
+                if (!check(TK{(int)'}'})) {
+                    do {
+                        Token field_name = expect(TK::Name, "field name");
+                        expect(TK{(int)'='}, "'='");
+                        Token type_name  = expect(TK::Name, "type name");
+                        sd.fields.push_back({field_name.str_val, type_name.str_val});
+                    } while (match(TK{(int)','}));
+                }
+                expect(TK{(int)'}'}, "'}'");
+                expect(TK{(int)')'}, "')'");
+
+                auto s = std::make_unique<Stmt>();
+                s->kind = std::move(sd);
+                s->loc  = l;
+                return s;
+            }
+            // If it wasn't struct(...), we can't easily backtrack in this
+            // recursive-descent parser. Emit an error.
+            error("expected 'struct(...)' after '= struct'");
+        }
+
+        // Normal: local name = expr — but we already consumed '=', so parse expr now.
+        std::optional<ExprPtr> init = parse_expr();
+        auto s = std::make_unique<Stmt>();
+        s->kind = LocalStmt{name.str_val, std::move(init)};
+        s->loc  = l;
+        return s;
+    }
+
     std::optional<ExprPtr> init;
     if (match(TK{(int)'='}))
         init = parse_expr();
@@ -413,6 +463,15 @@ ExprPtr Parser::parse_postfix() {
             base = std::move(e);
         } else if (check(TK{(int)'('})) {
             auto args = parse_args();
+            auto e = std::make_unique<Expr>();
+            e->kind = CallExpr{std::move(base), std::move(args)};
+            e->loc  = l;
+            base = std::move(e);
+        } else if (check(TK{(int)'{'})) {
+            // Lua shorthand: f { ... }  ≡  f({ ... })
+            ExprPtr tbl = parse_table_expr();
+            std::vector<ExprPtr> args;
+            args.push_back(std::move(tbl));
             auto e = std::make_unique<Expr>();
             e->kind = CallExpr{std::move(base), std::move(args)};
             e->loc  = l;

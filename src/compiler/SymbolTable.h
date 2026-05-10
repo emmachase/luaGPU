@@ -14,6 +14,7 @@ enum class BindingKind {
     ShaderLib,   // shaderlib upvalue reference
     Builtin,     // built-in function (math.sin, mix, etc.)
     Constructor, // vec3(), float(), mat4() etc.
+    StructType,  // named struct type (Ray, Hit, etc.) — callable as constructor
 };
 
 struct Binding {
@@ -31,6 +32,9 @@ struct Binding {
 
     // For Builtin / Constructor: GLSL name to emit
     std::string glsl_name;
+
+    // For StructType: the struct_id in the compiler's structs_ list
+    int struct_id = -1;
 };
 
 // ── Scope frame ────────────────────────────────────────────────────────────────

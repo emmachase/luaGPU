@@ -25,6 +25,8 @@ private:
     const CallNameMap *call_names_ = nullptr;
     // All helper instances (for return-type lookup when local init type is Unknown).
     const std::vector<MonoInstance *> *mono_order_ = nullptr;
+    // Struct definitions (for glsl_name lookup in type_str).
+    const std::vector<StructDef> *structs_ = nullptr;
     int                indent_     = 0;
 
     void line(const std::string &s = "");

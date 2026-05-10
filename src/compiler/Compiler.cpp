@@ -76,9 +76,22 @@ CompileResult Compiler::compile(const ShaderFunc          &sf,
     }
 
     // ── Passes 2 + 3 on the outer body (for local var types) ──────────────
-    TypeCtx global_ctx{expr_types_, uf_, next_struct_id_, structs_};
+    TypeCtx global_ctx{expr_types_, uf_, next_struct_id_, structs_, named_structs_};
     type_block(sf.body, base_sym, global_ctx);
     pass3_solve(global_ctx);
+
+    // ── Inject named struct bindings into base_sym ────────────────────────
+    // StructDeclStmt defines struct names into the scope inside type_block,
+    // but base_sym is the root scope used for monomorphization. We need to
+    // make named structs visible in all instantiated function bodies.
+    for (auto &[sname, sid] : named_structs_) {
+        Binding b;
+        b.name      = sname;
+        b.kind      = BindingKind::StructType;
+        b.type      = TypeInfo::make_struct(sid);
+        b.struct_id = sid;
+        base_sym.define(std::move(b));
+    }
 
     // ── Semantic validation ────────────────────────────────────────────────
     validate(sf.body, false);
@@ -234,6 +247,62 @@ void Compiler::type_stmt(const Stmt &s, SymbolTable &sym, TypeCtx &ctx) {
 
         } else if constexpr (std::is_same_v<T, BreakStmt>) {
             // nothing
+
+        } else if constexpr (std::is_same_v<T, StructDeclStmt>) {
+            // Resolve each field type name to a TypeInfo.
+            // Supported: builtin GLSL scalar/vector/matrix names, or a previously
+            // declared named struct name (declaration order required).
+            auto resolve_type_name = [&](const std::string &tname,
+                                         const SrcLoc &loc) -> TypeInfo {
+                // Builtin primitive types
+                static const std::unordered_map<std::string, GlslType> prim_map = {
+                    {"float",     GlslType::Float},
+                    {"int",       GlslType::Int},
+                    {"bool",      GlslType::Bool},
+                    {"vec2",      GlslType::Vec2},
+                    {"vec3",      GlslType::Vec3},
+                    {"vec4",      GlslType::Vec4},
+                    {"ivec2",     GlslType::IVec2},
+                    {"ivec3",     GlslType::IVec3},
+                    {"ivec4",     GlslType::IVec4},
+                    {"mat2",      GlslType::Mat2},
+                    {"mat3",      GlslType::Mat3},
+                    {"mat4",      GlslType::Mat4},
+                    {"sampler2D", GlslType::Sampler2D},
+                };
+                auto pit = prim_map.find(tname);
+                if (pit != prim_map.end()) return TypeInfo::make(pit->second);
+
+                // Named struct type
+                auto nit = ctx.named_structs.find(tname);
+                if (nit != ctx.named_structs.end())
+                    return TypeInfo::make_struct(nit->second);
+
+                emit_error(loc, "unknown type '" + tname +
+                           "' in struct field (named structs must be declared before use)");
+                return TypeInfo::unknown();
+            };
+
+            int sid = ctx.next_struct_id++;
+            StructDef sd;
+            sd.id        = sid;
+            sd.is_named  = true;
+            sd.user_name = sk.name;
+            sd.glsl_name = sk.name;  // named structs keep user name
+            for (auto &[fname, tname] : sk.fields) {
+                TypeInfo ft = resolve_type_name(tname, s.loc);
+                sd.fields.push_back({fname, ft});
+            }
+            ctx.structs.push_back(std::move(sd));
+            ctx.named_structs[sk.name] = sid;
+
+            // Register in the symbol table so Ray{...} is recognised as a ctor call.
+            Binding b;
+            b.name      = sk.name;
+            b.kind      = BindingKind::StructType;
+            b.type      = TypeInfo::make_struct(sid);
+            b.struct_id = sid;
+            sym.define(std::move(b));
         }
     }, s.kind);
 }
@@ -369,6 +438,59 @@ TypeInfo Compiler::type_call(const CallExpr &call, const SrcLoc &loc,
         const Binding *b = sym.lookup(ne->name);
         if (!b) { emit_error(loc, "call to undefined '" + ne->name + "'"); return TypeInfo::unknown(); }
         if (b->kind == BindingKind::Constructor) return b->type;
+        if (b->kind == BindingKind::StructType) {
+            // Named struct constructor: Ray { origin = vec3(...), dir = vec3(...) }
+            // The single argument must be a TableExpr; its fields are already
+            // type-checked above (arg_types[0] typed the TableExpr anonymously).
+            // We need to:
+            //  1. Validate that the table fields match the declared struct.
+            //  2. Return the named struct's TypeInfo (not the anonymous one).
+            int sid = b->struct_id;
+            if (call.args.size() != 1) {
+                emit_error(loc, "struct constructor '" + ne->name +
+                           "' requires exactly one table argument");
+                return TypeInfo::unknown();
+            }
+            auto *te = std::get_if<TableExpr>(&call.args[0]->kind);
+            if (!te) {
+                emit_error(loc, "struct constructor '" + ne->name +
+                           "' argument must be a table literal { field = value, ... }");
+                return TypeInfo::unknown();
+            }
+            // Find the declared StructDef.
+            StructDef *decl = nullptr;
+            for (auto &sd : ctx.structs)
+                if (sd.id == sid) { decl = &sd; break; }
+            if (!decl) {
+                emit_error(loc, "internal: struct def not found for '" + ne->name + "'");
+                return TypeInfo::unknown();
+            }
+            // Validate: every field in the table literal must exist in the declaration,
+            // and every declared field must be present.
+            for (auto &tf : te->fields) {
+                bool found = false;
+                for (auto &df : decl->fields)
+                    if (df.name == tf.key) { found = true; break; }
+                if (!found)
+                    emit_error(loc, "struct '" + ne->name +
+                               "' has no field '" + tf.key + "'");
+            }
+            for (auto &df : decl->fields) {
+                bool found = false;
+                for (auto &tf : te->fields)
+                    if (tf.key == df.name) { found = true; break; }
+                if (!found)
+                    emit_error(loc, "missing field '" + df.name +
+                               "' in constructor for struct '" + ne->name + "'");
+            }
+            // Override the anonymous struct's type annotation with the named one.
+            // The anonymous struct created by type_expr(TableExpr) gets remapped
+            // to the named struct's sid in pass5, but we can do better: directly
+            // annotate the call expression and the table expression with the named sid.
+            TypeInfo named_ti = TypeInfo::make_struct(sid);
+            ctx.expr_types[call.args[0].get()] = named_ti;
+            return named_ti;
+        }
         if (b->kind == BindingKind::Builtin) {
             if (b->type.tag != GlslType::Unknown) return b->type;
             return arg_types.empty() ? TypeInfo::unknown() : arg_types[0];
@@ -566,7 +688,10 @@ void Compiler::validate(const Block &block, bool inside_shader_body) {
                 validate_expr(*sk.stop,  inside_shader_body);
                 if (sk.step) validate_expr(**sk.step, inside_shader_body);
                 validate(sk.body, inside_shader_body);
-            } else if constexpr (std::is_same_v<T, BreakStmt>) {}
+            } else if constexpr (std::is_same_v<T, BreakStmt>) {
+            } else if constexpr (std::is_same_v<T, StructDeclStmt>) {
+                // Nothing to validate — field types were resolved at parse time.
+            }
         }, s->kind);
     }
 }
@@ -675,8 +800,14 @@ void Compiler::pass5_dedup_structs() {
     // Use alphabetical field order (as per spec) for the key.
 
     // Returns a string key representing the struct shape.
+    // Named structs include their user name in the key so they are never merged
+    // with anonymous structs or other named structs (even if the layout matches).
     // Returns "" if any field is still unknown (cannot deduplicate yet).
     auto struct_key = [&](const StructDef &sd) -> std::string {
+        // Named structs are unique by name — never merge with anything else.
+        if (sd.is_named)
+            return "__named__" + sd.user_name + "__";
+
         // Sort fields by name for structural comparison.
         std::vector<std::pair<std::string,TypeInfo>> sorted_fields;
         sorted_fields.reserve(sd.fields.size());
@@ -872,9 +1003,14 @@ void Compiler::pass5_dedup_structs() {
     structs_ = std::move(sorted);
 
     // ── Step 6: rename surviving structs S0, S1, ... in topo order ───────────
+    // Named structs keep their user_name as glsl_name; anonymous ones get S0, S1, ...
     int name_idx = 0;
-    for (auto &sd : structs_)
-        sd.glsl_name = "S" + std::to_string(name_idx++);
+    for (auto &sd : structs_) {
+        if (sd.is_named)
+            sd.glsl_name = sd.user_name;
+        else
+            sd.glsl_name = "S" + std::to_string(name_idx++);
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -894,7 +1030,7 @@ TypeInfo Compiler::typecheck_instance(MonoInstance &inst, SymbolTable &base_sym)
     }
 
     // Run type inference on the body using this instance's own ctx.
-    TypeCtx inst_ctx{inst.expr_types, inst.uf, next_struct_id_, structs_};
+    TypeCtx inst_ctx{inst.expr_types, inst.uf, next_struct_id_, structs_, named_structs_};
     type_block(*inst.body, sym, inst_ctx);
     pass3_solve(inst_ctx);
 

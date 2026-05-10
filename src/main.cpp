@@ -261,7 +261,7 @@ struct ErrorOverlay {
             "    int glyph = u_chars[ci] - 32;\n"
             "    if(glyph < 0 || glyph >= 96){ frag_out = bg; return; }\n"
             // Atlas is 768 wide (96*8), 8 tall.
-            "    float u = (float(glyph * GW + px) + 0.5) / 768.0;\n"
+            "    float u = (float(glyph * GW + (GW - 1 - px)) + 0.5) / 768.0;\n"
             "    float v = (float(py) + 0.5) / 8.0;\n"
             "    float bit = texture(u_font, vec2(u, v)).r;\n"
             "    vec4 fg = vec4(1.0, 0.85, 0.3, 1.0);\n"   // amber text

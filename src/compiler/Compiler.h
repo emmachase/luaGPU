@@ -20,8 +20,10 @@ struct StructField {
 };
 struct StructDef {
     int                      id;
-    std::string              glsl_name; // S0, S1, ...
+    std::string              glsl_name; // S0, S1, ... (or user_name for named structs)
     std::vector<StructField> fields;    // declaration order
+    bool                     is_named = false;
+    std::string              user_name;  // e.g. "Ray" (empty for anonymous)
 };
 
 // ── Annotated expression type map ─────────────────────────────────────────────
@@ -109,6 +111,9 @@ private:
     std::vector<StructDef>   structs_;
     int                      next_struct_id_ = 0;
 
+    // Named struct registry: user name → struct_id
+    std::unordered_map<std::string, int> named_structs_;
+
     // Monomorphization registry: key → instance.
     // Stored by value; pointers into this map are stable after reservation.
     std::unordered_map<MonoKey, MonoInstance, MonoKeyHash> mono_registry_;
@@ -151,6 +156,8 @@ private:
         UnionFind   &uf;
         int         &next_struct_id;
         std::vector<StructDef> &structs;
+        // Maps user-defined struct name → struct_id (populated by type_stmt on StructDeclStmt)
+        std::unordered_map<std::string, int> &named_structs;
     };
 
     TypeInfo type_expr (const Expr &e, SymbolTable &sym, TypeCtx &ctx);
