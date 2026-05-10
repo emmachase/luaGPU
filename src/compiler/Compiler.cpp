@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <cassert>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <map>
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -123,9 +126,13 @@ CompileResult Compiler::compile(const ShaderFunc          &sf,
         // Store in registry and emit order.
         auto [it, inserted] = mono_registry_.emplace(entry_key, std::move(entry_inst));
         MonoInstance *entry_ptr = &it->second;
+        entry_inst_ = entry_ptr;
 
         // ── Pass 4: walk call graph from entry ────────────────────────────
         pass4_monomorphize(*entry_ptr, base_sym);
+
+        // ── Pass 5: struct dedup & topo-sort ──────────────────────────────
+        pass5_dedup_structs();
 
         // Emit
         Emitter emitter;
@@ -295,6 +302,33 @@ TypeInfo Compiler::type_expr(const Expr &e, SymbolTable &sym, TypeCtx &ctx) {
             return type_unop(ek.op, op_ty, e.loc);
 
         } else if constexpr (std::is_same_v<T, BinaryExpr>) {
+            int And_v = (int)TK::And, Or_v = (int)TK::Or;
+
+            // Ternary pattern: (cond and A) or B
+            // The result type is the type of A (or B — they should unify).
+            // Don't let type_binop return Bool for this case.
+            if (ek.op == Or_v) {
+                if (auto *inner = std::get_if<BinaryExpr>(&ek.left->kind)) {
+                    if (inner->op == And_v) {
+                        // Type-check all three sub-expressions.
+                        type_expr(*inner->left,  sym, ctx);  // condition
+                        TypeInfo ty_a = type_expr(*inner->right, sym, ctx);  // consequent
+                        TypeInfo ty_b = type_expr(*ek.right,     sym, ctx);  // alternate
+                        // Unify consequent and alternate.
+                        if (!ty_a.is_unknown() && !ty_b.is_unknown()) {
+                            if (ty_a.is_tvar()) {
+                                TypeInfo ex; ctx.uf.constrain(ty_a.tvar_id, ty_b, ex);
+                            } else if (ty_b.is_tvar()) {
+                                TypeInfo ex; ctx.uf.constrain(ty_b.tvar_id, ty_a, ex);
+                            }
+                        }
+                        TypeInfo result = ty_a.is_unknown() ? ty_b : ty_a;
+                        ctx.expr_types[&e] = result;
+                        return result;
+                    }
+                }
+            }
+
             TypeInfo lhs = type_expr(*ek.left,  sym, ctx);
             TypeInfo rhs = type_expr(*ek.right, sym, ctx);
             return type_binop(ek.op, lhs, rhs, e.loc, ctx);
@@ -573,6 +607,274 @@ void Compiler::validate_expr(const Expr &e, bool inside_shader_body) {
         } else if constexpr (std::is_same_v<T, TableExpr>)
             for (auto &f : ek.fields) validate_expr(*f.value, inside_shader_body);
     }, e.kind);
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Pass 5 — struct deduplication & topo-sort
+// ───────────────────────────────────────────────────────────────────────────────
+
+// Rewrite a single TypeInfo: if it's a struct, apply remap.
+static TypeInfo remap_ti(TypeInfo ti, const std::unordered_map<int,int> &remap) {
+    if (ti.tag == GlslType::Struct) {
+        auto it = remap.find(ti.struct_id);
+        if (it != remap.end()) ti.struct_id = it->second;
+    }
+    return ti;
+}
+
+// Remap all TypeInfos in an ExprTypeMap.
+static void remap_expr_map(ExprTypeMap &m, const std::unordered_map<int,int> &remap) {
+    for (auto &kv : m) {
+        auto &ti = const_cast<TypeInfo &>(kv.second);
+        ti = remap_ti(ti, remap);
+    }
+}
+
+void Compiler::rewrite_struct_id(int old_id, int new_id) {
+    struct_remap_[old_id] = new_id;
+}
+
+void Compiler::pass5_dedup_structs() {
+    // ── Step 1: resolve all struct field types through the global UF ──────────
+    // Structs are created in type_expr using the global uf_ (or per-instance uf
+    // stored in inst.uf). Field types may still be tvars.
+    // We need to resolve field types through each struct's owning UF.
+    // Since struct_id is globally unique and structs_ is shared, but each struct
+    // was created in some TypeCtx (global or per-instance), we resolve through
+    // all available UFs.
+    //
+    // Strategy: collect all UFs (global + per instance) and resolve each field
+    // type through whichever UF can concretize it.
+
+    auto try_resolve = [&](TypeInfo ti) -> TypeInfo {
+        if (ti.is_tvar()) {
+            TypeInfo r = uf_.resolve(ti);
+            if (!r.is_tvar()) return r;
+            // Try entry instance UF.
+            if (entry_inst_) {
+                r = entry_inst_->uf.resolve(ti);
+                if (!r.is_tvar()) return r;
+            }
+            // Try per-helper-instance UFs.
+            for (auto *inst : mono_order_) {
+                r = inst->uf.resolve(ti);
+                if (!r.is_tvar()) return r;
+            }
+        }
+        return ti;
+    };
+
+    for (auto &sd : structs_) {
+        for (auto &f : sd.fields)
+            f.type = try_resolve(f.type);
+    }
+
+    // ── Step 2: build canonical signature for each struct ─────────────────────
+    // Key: sorted list of (field_name, type_tag, struct_id_if_struct)
+    // We need the field types to be concrete for this to work.
+    // Use alphabetical field order (as per spec) for the key.
+
+    // Returns a string key representing the struct shape.
+    // Returns "" if any field is still unknown (cannot deduplicate yet).
+    auto struct_key = [&](const StructDef &sd) -> std::string {
+        // Sort fields by name for structural comparison.
+        std::vector<std::pair<std::string,TypeInfo>> sorted_fields;
+        sorted_fields.reserve(sd.fields.size());
+        for (auto &f : sd.fields)
+            sorted_fields.push_back({f.name, f.type});
+        std::sort(sorted_fields.begin(), sorted_fields.end(),
+                  [](auto &a, auto &b){ return a.first < b.first; });
+
+        std::string key;
+        for (auto &[name, ti] : sorted_fields) {
+            key += name + ":";
+            if (ti.tag == GlslType::Struct)
+                key += "S" + std::to_string(ti.struct_id);
+            else if (ti.is_tvar() || ti.is_unknown())
+                key += "?";
+            else
+                key += glsl_type_name(ti.tag);
+            key += ";";
+        }
+        return key;
+    };
+
+    // ── Step 3: deduplicate — multiple passes until stable ───────────────────
+    // Each pass: for each struct, compute its key; if a lower-id struct with the
+    // same key exists, merge the higher-id one into it.
+    // Repeat until no merges happen (handles chains through nested structs).
+    // Bounded by structs_.size() passes (monotone: each pass reduces IDs).
+    bool changed = true;
+    int dedup_limit = static_cast<int>(structs_.size()) + 1;
+    while (changed && dedup_limit-- > 0) {
+        changed = false;
+        std::unordered_map<int,int> pass_remap;  // old → canonical within this pass
+        // key → minimum struct_id seen with that shape
+        std::map<std::string, int> key_to_canonical;
+
+        // Accumulate global remap from previous passes so we skip already-dead structs.
+        for (auto &sd : structs_) {
+            // Skip structs already remapped to something else.
+            if (struct_remap_.count(sd.id)) continue;
+
+            // Apply any remaps already found this pass to field types first.
+            for (auto &f : sd.fields)
+                f.type = remap_ti(f.type, pass_remap);
+
+            std::string key = struct_key(sd);
+            if (key.empty() || key.find('?') != std::string::npos) continue;
+
+            auto it = key_to_canonical.find(key);
+            if (it == key_to_canonical.end()) {
+                key_to_canonical[key] = sd.id;
+            } else {
+                // Always keep the minimum id as canonical.
+                int canonical = std::min(it->second, sd.id);
+                int loser     = std::max(it->second, sd.id);
+                it->second = canonical;
+                if (loser != canonical) {
+                    pass_remap[loser] = canonical;
+                    changed = true;
+                }
+            }
+        }
+
+        if (!pass_remap.empty()) {
+            // Apply pass_remap globally to struct fields.
+            for (auto &sd : structs_)
+                for (auto &f : sd.fields)
+                    f.type = remap_ti(f.type, pass_remap);
+
+            // Apply to entry instance.
+            if (entry_inst_) {
+                remap_expr_map(entry_inst_->expr_types, pass_remap);
+                entry_inst_->return_type = remap_ti(entry_inst_->return_type, pass_remap);
+                for (auto &pt : entry_inst_->param_types)
+                    pt = remap_ti(pt, pass_remap);
+            }
+
+            // Apply to all helper MonoInstance data.
+            for (auto *inst : mono_order_) {
+                remap_expr_map(inst->expr_types, pass_remap);
+                inst->return_type = remap_ti(inst->return_type, pass_remap);
+                for (auto &pt : inst->param_types)
+                    pt = remap_ti(pt, pass_remap);
+            }
+
+            // Apply to global expr_types.
+            remap_expr_map(expr_types_, pass_remap);
+
+            // Accumulate into struct_remap_.
+            for (auto &[old_id, new_id] : pass_remap)
+                struct_remap_[old_id] = new_id;
+        }
+    }
+
+    // ── Step 4: collect surviving struct ids ──────────────────────────────────
+    // A struct is dead if it was merged into another (in struct_remap_) OR if
+    // it is never referenced in any expression, param, return type, or field.
+    std::unordered_set<int> dead_ids;
+    for (auto &[old_id, new_id] : struct_remap_)
+        dead_ids.insert(old_id);
+
+    // Collect all live struct IDs from expressions and instance signatures.
+    std::unordered_set<int> live_ids;
+    auto mark_live = [&](TypeInfo ti) {
+        if (ti.tag == GlslType::Struct) live_ids.insert(ti.struct_id);
+    };
+    auto mark_map = [&](const ExprTypeMap &m) {
+        for (auto &kv : m) mark_live(kv.second);
+    };
+    mark_map(expr_types_);
+    if (entry_inst_) {
+        mark_map(entry_inst_->expr_types);
+        mark_live(entry_inst_->return_type);
+        for (auto &pt : entry_inst_->param_types) mark_live(pt);
+    }
+    for (auto *inst : mono_order_) {
+        mark_map(inst->expr_types);
+        mark_live(inst->return_type);
+        for (auto &pt : inst->param_types) mark_live(pt);
+    }
+    // Also mark struct IDs referenced in struct fields (for nested structs).
+    // Expand transitively.
+    bool liveness_changed = true;
+    while (liveness_changed) {
+        liveness_changed = false;
+        for (auto &sd : structs_) {
+            if (!live_ids.count(sd.id)) continue;
+            for (auto &f : sd.fields) {
+                if (f.type.tag == GlslType::Struct) {
+                    if (!live_ids.count(f.type.struct_id)) {
+                        live_ids.insert(f.type.struct_id);
+                        liveness_changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove dead and unreferenced structs.
+    structs_.erase(std::remove_if(structs_.begin(), structs_.end(),
+        [&](const StructDef &sd){
+            return dead_ids.count(sd.id) > 0 || !live_ids.count(sd.id);
+        }),
+        structs_.end());
+
+    // ── Step 5: topo-sort surviving structs by dependency ────────────────────
+    // Build adjacency: struct A depends on struct B if any field of A has type B.
+    std::unordered_map<int, std::vector<int>> deps; // id → ids it depends on
+    for (auto &sd : structs_) {
+        for (auto &f : sd.fields) {
+            if (f.type.tag == GlslType::Struct && f.type.struct_id != sd.id)
+                deps[sd.id].push_back(f.type.struct_id);
+        }
+    }
+
+    // Kahn's algorithm.
+    // Topo-sort using remaining_deps set: emit a node when all its deps are done.
+    std::unordered_map<int, std::unordered_set<int>> remaining_deps;
+    for (auto &sd : structs_) {
+        remaining_deps[sd.id] = {};
+        for (auto &f : sd.fields)
+            if (f.type.tag == GlslType::Struct && f.type.struct_id != sd.id)
+                remaining_deps[sd.id].insert(f.type.struct_id);
+    }
+
+    std::vector<StructDef> sorted;
+    std::unordered_set<int> emitted_ids;
+    sorted.reserve(structs_.size());
+
+    // Build a map for quick lookup.
+    std::unordered_map<int, const StructDef *> id_to_def;
+    for (auto &sd : structs_) id_to_def[sd.id] = &sd;
+
+    bool progress = true;
+    while (sorted.size() < structs_.size() && progress) {
+        progress = false;
+        for (auto &sd : structs_) {
+            if (emitted_ids.count(sd.id)) continue;
+            // Check all deps are emitted.
+            bool ready = true;
+            for (int dep : remaining_deps[sd.id])
+                if (!emitted_ids.count(dep)) { ready = false; break; }
+            if (ready) {
+                sorted.push_back(sd);
+                emitted_ids.insert(sd.id);
+                progress = true;
+            }
+        }
+    }
+    // If there are cycles (shouldn't happen with anonymous structs), append remainder.
+    for (auto &sd : structs_)
+        if (!emitted_ids.count(sd.id)) sorted.push_back(sd);
+
+    structs_ = std::move(sorted);
+
+    // ── Step 6: rename surviving structs S0, S1, ... in topo order ───────────
+    int name_idx = 0;
+    for (auto &sd : structs_)
+        sd.glsl_name = "S" + std::to_string(name_idx++);
 }
 
 // ───────────────────────────────────────────────────────────────────────────────

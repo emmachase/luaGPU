@@ -117,6 +117,10 @@ private:
     // Functions must appear before their callers — built by DFS in pass 4.
     std::vector<MonoInstance *> mono_order_;
 
+    // Entry instance pointer (shader_main) — not in mono_order_ but needs
+    // struct remapping in pass5.
+    MonoInstance *entry_inst_ = nullptr;
+
     // Function signatures discovered in pass 1
     struct FuncSig {
         std::string              name;
@@ -165,6 +169,21 @@ private:
     // ── Semantic validation ────────────────────────────────────────────────
     void validate      (const Block &block, bool inside_shader_body);
     void validate_expr (const Expr  &e,     bool inside_shader_body);
+
+    // ── Pass 5: struct deduplication & topo-sort ──────────────────────────
+    // Resolves struct field types, merges structurally identical structs,
+    // rewrites all struct_id references, and topo-sorts for emission.
+    void pass5_dedup_structs();
+
+    // Rewrite all struct_id references: old_id → new_id.
+    // Walks structs_, all MonoInstance expr_types / param_types / return_types.
+    void rewrite_struct_id(int old_id, int new_id);
+
+    // Resolve a TypeInfo's struct_id through the dedup map (after pass5).
+    TypeInfo resolve_struct(TypeInfo ti) const;
+
+    // Struct id remapping built by pass5: old_id → canonical_id.
+    std::unordered_map<int, int> struct_remap_;
 
     // ── Pass 4: monomorphization ───────────────────────────────────────────
     // Walks the call graph from the entry point, type-checks each unique

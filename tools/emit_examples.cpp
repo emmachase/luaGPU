@@ -26,6 +26,7 @@ int main() {
         { "raymarcher",    "examples/raymarcher.lua"    },
         { "voronoi",       "examples/voronoi.lua"       },
         { "fbm_landscape", "examples/fbm_landscape.lua" },
+        { "struct_test",   "examples/struct_test.lua"   },
     };
 
     int failures = 0;
