@@ -21,7 +21,7 @@ local myShader = shader(function(u_time, u_resolution)
         return 0.5 + 0.5 * sin(v)
     end
 
-    return function main(uv)
+    return function(uv)
         -- Remap uv from [0,1]^2 to [-1,1]^2, correct for aspect ratio.
         local aspect = u_resolution.x / u_resolution.y
         local p = vec2((uv.x - 0.5) * aspect * 2.0, (uv.y - 0.5) * 2.0)
@@ -31,3 +31,5 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(col, 1.0)
     end
 end)
+
+return myShader

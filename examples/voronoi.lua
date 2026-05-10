@@ -63,7 +63,7 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(d1, d2, id_x, id_y)
     end
 
-    return function main(uv)
+    return function(uv)
         local aspect = u_resolution.x / u_resolution.y
         local scale  = 6.0
         local p = vec2(uv.x * aspect, uv.y) * scale
@@ -92,3 +92,5 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(clamp(col, 0.0, 1.0), 1.0)
     end
 end)
+
+return myShader

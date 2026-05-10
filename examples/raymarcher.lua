@@ -97,7 +97,7 @@ local myShader = shader(function(u_time, u_resolution)
 
     -- ── Shading ───────────────────────────────────────────────────────────
 
-    return function main(uv)
+    return function(uv)
         -- Camera: look toward the scene centre from a slightly elevated position.
         local aspect = u_resolution.x / u_resolution.y
         local ro = vec3(sin(u_time * 0.2) * 3.0, 1.5, -1.0)
@@ -139,3 +139,5 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(col, 1.0)
     end
 end)
+
+return myShader

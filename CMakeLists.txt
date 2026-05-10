@@ -53,14 +53,18 @@ target_link_libraries(host PUBLIC
 )
 
 # ── Application executable ─────────────────────────────────────────────────────
-# Add your application sources here.
-# add_executable(luagpu src/main.cpp)
-# target_link_libraries(luagpu PRIVATE
-#     host
-#     OpenGL::GL
-#     glfw
-#     glad::glad
-# )
+add_executable(luagpu src/main.cpp)
+target_include_directories(luagpu PRIVATE src/host src/compiler)
+target_link_libraries(luagpu PRIVATE
+    host
+    OpenGL::GL
+    glfw
+    glad::glad
+)
+target_compile_options(luagpu PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
+)
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
 enable_testing()

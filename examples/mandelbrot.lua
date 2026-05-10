@@ -38,7 +38,7 @@ local myShader = shader(function(u_time, u_resolution)
         return vec3(r, g, b)
     end
 
-    return function main(uv)
+    return function(uv)
         local aspect = u_resolution.x / u_resolution.y
 
         -- Animated zoom toward a known interesting point.
@@ -55,3 +55,5 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(col, 1.0)
     end
 end)
+
+return myShader

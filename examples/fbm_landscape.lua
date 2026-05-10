@@ -61,7 +61,7 @@ local myShader = shader(function(u_time, u_resolution)
         return col
     end
 
-    return function main(uv)
+    return function(uv)
         -- Drift the view slowly over time.
         local offset = vec2(u_time * 0.04, u_time * 0.025)
         local p = uv * 3.5 + offset
@@ -93,3 +93,5 @@ local myShader = shader(function(u_time, u_resolution)
         return vec4(clamp(col, 0.0, 1.0), 1.0)
     end
 end)
+
+return myShader

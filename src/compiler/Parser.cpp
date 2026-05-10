@@ -50,7 +50,8 @@ ShaderFunc Parser::parse(std::string_view source, std::string src_name) {
     if (wrapped)
         p.expect(TK{(int)')'}, "')'");  // closing ')' of shader(...)
 
-    if (!p.check(TK::Eof))
+    // When wrapped (Form B), trailing Lua (e.g. "return myShader") is fine.
+    if (!wrapped && !p.check(TK::Eof))
         p.error("unexpected token after outer function");
 
     ShaderFunc sf;
