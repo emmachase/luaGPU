@@ -435,17 +435,9 @@ std::string Emitter::expr_str(const Expr &e) {
                         }
                         return s + ")";
                     }
-                    // shaderlib.fn → emitted_name(args) — resolved from mono_registry
-                    // The callee name is already the emitted name if in mono_order;
-                    // for simplicity emit as lib_fn(...) and let the linker resolve.
-                    {
-                        std::string s = ne->name + "_" + fe->field + "(";
-                        for (size_t i = 0; i < ek.args.size(); ++i) {
-                            if (i > 0) s += ", ";
-                            s += expr_str(*ek.args[i]);
-                        }
-                        return s + ")";
-                    }
+                    // shaderlib.fn — fall through to the generic call path below,
+                    // which resolves the emitted name from call_names_.
+                    // (Do NOT emit ne->name + "_" + fe->field here.)
                 }
             }
 

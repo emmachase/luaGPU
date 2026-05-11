@@ -38,6 +38,16 @@ struct UniformDesc {
     int         upvalue_index; // 1-based, as returned by lua_getupvalue
 };
 
+// ── Shaderlib descriptor ───────────────────────────────────────────────────────
+// Describes a shaderlib whose functions can be called from the shader.
+// The compiler parses src_text, collects exported functions, and monomorphizes
+// only those that are reachable from the entry point.
+struct ShaderLibDesc {
+    std::string name;      // upvalue name used in the shader (e.g. "noise")
+    std::string src_text;  // source text of the shaderlib closure body
+    std::string src_name;  // file/chunk name for diagnostics
+};
+
 // ── Monomorphization key ───────────────────────────────────────────────────────
 struct MonoKey {
     std::string           func_name;
@@ -93,14 +103,20 @@ struct CompileResult {
 // ── Compiler ──────────────────────────────────────────────────────────────────
 class Compiler {
 public:
-    CompileResult compile(const ShaderFunc          &sf,
-                          const std::vector<UniformDesc> &uniforms);
+    CompileResult compile(const ShaderFunc               &sf,
+                          const std::vector<UniformDesc>  &uniforms,
+                          const std::vector<ShaderLibDesc> &shaderlibs = {});
 
 private:
     // ── persistent compiler state ──────────────────────────────────────────
     const ShaderFunc        *sf_          = nullptr;
-    std::vector<UniformDesc> uniforms_;
+    std::vector<UniformDesc>  uniforms_;
+    std::vector<ShaderLibDesc> shaderlibs_;
     bool                     had_errors_  = false;
+
+    // Parsed shaderlib ASTs (owned; indexed in parallel with shaderlibs_).
+    // Stored here so the Block* pointers in FuncSig remain valid.
+    std::vector<ShaderFunc>  shaderlib_asts_;
 
     // Global (shader-level) type annotation and union-find.
     // Used for passes 1-3 over the outer function body.

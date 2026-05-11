@@ -1,6 +1,7 @@
 #include "Compiler.h"
 #include "Emitter.h"
 #include "Lexer.h"
+#include "Parser.h"
 #include <sstream>
 #include <algorithm>
 #include <cassert>
@@ -33,13 +34,36 @@ const Compiler::FuncSig *Compiler::find_sig(const std::string &name,
 // Top-level entry
 // ───────────────────────────────────────────────────────────────────────────────
 
-CompileResult Compiler::compile(const ShaderFunc          &sf,
-                                 const std::vector<UniformDesc> &uniforms) {
-    sf_       = &sf;
-    uniforms_ = uniforms;
+CompileResult Compiler::compile(const ShaderFunc               &sf,
+                                 const std::vector<UniformDesc>  &uniforms,
+                                 const std::vector<ShaderLibDesc> &shaderlibs) {
+    sf_         = &sf;
+    uniforms_   = uniforms;
+    shaderlibs_ = shaderlibs;
+
+    // ── Parse and register shaderlibs ─────────────────────────────────────
+    // Each shaderlib is a closure whose body contains local function declarations
+    // and a return statement returning a table of exported names.  We parse the
+    // body text, collect all local function signatures with the lib name, and
+    // record the exported names from the ReturnStmt's TableExpr.
+    shaderlib_asts_.reserve(shaderlibs_.size());
+    for (auto &lib : shaderlibs_) {
+        try {
+            ShaderFunc lib_sf = Parser::parse(lib.src_text, lib.src_name);
+            shaderlib_asts_.push_back(std::move(lib_sf));
+        } catch (const std::exception &ex) {
+            emit_error({lib.src_name, 0},
+                       "shaderlib '" + lib.name + "': parse error: " + ex.what());
+            shaderlib_asts_.push_back(ShaderFunc{});  // placeholder
+        }
+    }
 
     // ── Pass 1 ────────────────────────────────────────────────────────────
     pass1_collect_signatures(sf.body);
+    // Also collect shaderlib function signatures, keyed by lib name.
+    for (size_t li = 0; li < shaderlibs_.size(); ++li) {
+        pass1_collect_signatures(shaderlib_asts_[li].body, shaderlibs_[li].name);
+    }
 
     // ── Build base symbol table ────────────────────────────────────────────
     SymbolTable base_sym;   // global scope with builtins already installed
@@ -72,6 +96,17 @@ CompileResult Compiler::compile(const ShaderFunc          &sf,
         b.func_params = fs.params;
         b.func_body   = fs.body;
         b.type        = TypeInfo::unknown();   // polymorphic
+        base_sym.define(std::move(b));
+    }
+
+    // Install a ShaderLib binding for each lib name so that `noise.fbm(...)` is
+    // recognised: pass4 looks up the base name ("noise") and expects ShaderLib kind.
+    for (auto &lib : shaderlibs_) {
+        Binding b;
+        b.name     = lib.name;
+        b.lib_name = lib.name;
+        b.kind     = BindingKind::ShaderLib;
+        b.type     = TypeInfo::unknown();
         base_sym.define(std::move(b));
     }
 
@@ -520,11 +555,13 @@ TypeInfo Compiler::type_call(const CallExpr &call, const SrcLoc &loc,
             if (b->type.tag != GlslType::Unknown) return b->type;
             return arg_types.empty() ? TypeInfo::unknown() : arg_types[0];
         }
-        if (b->kind == BindingKind::Function) {
-            // Polymorphic local — look up an already-resolved MonoInstance.
-            // First try an exact key match.
+        if (b->kind == BindingKind::Function ||
+            b->kind == BindingKind::ShaderLib) {
+            // Polymorphic local or intra-shaderlib call.
+            // Look up an already-resolved MonoInstance.
             MonoKey probe;
             probe.func_name = ne->name;
+            probe.lib_name  = (b->kind == BindingKind::ShaderLib) ? b->lib_name : "";
             probe.arg_types = arg_types;
             auto it = mono_registry_.find(probe);
             if (it != mono_registry_.end() &&
@@ -1117,6 +1154,12 @@ void Compiler::pass4_monomorphize(const MonoInstance &entry, SymbolTable &base_s
                         if (b && b->kind == BindingKind::Function) {
                             key.func_name = ne->name;
                             sig = find_sig(ne->name, "");
+                        } else if (b && b->kind == BindingKind::ShaderLib &&
+                                   !b->lib_name.empty()) {
+                            // Intra-shaderlib call (bare name for a private helper).
+                            key.func_name = ne->name;
+                            key.lib_name  = b->lib_name;
+                            sig = find_sig(ne->name, b->lib_name);
                         }
                     } else if (auto *fe = std::get_if<FieldExpr>(&ek.callee->kind)) {
                         if (auto *fe_base = std::get_if<NameExpr>(&fe->base->kind)) {
@@ -1261,6 +1304,20 @@ void Compiler::pass4_monomorphize(const MonoInstance &entry, SymbolTable &base_s
                             if (b && b->kind == BindingKind::Function) {
                                 key.func_name = ne->name;
                                 sig = find_sig(ne->name, "");
+                            } else if (b && b->kind == BindingKind::ShaderLib &&
+                                       !b->lib_name.empty()) {
+                                key.func_name = ne->name;
+                                key.lib_name  = b->lib_name;
+                                sig = find_sig(ne->name, b->lib_name);
+                            }
+                        } else if (auto *fe = std::get_if<FieldExpr>(&ek.callee->kind)) {
+                            if (auto *fe_base = std::get_if<NameExpr>(&fe->base->kind)) {
+                                const Binding *lib = base_sym.lookup(fe_base->name);
+                                if (lib && lib->kind == BindingKind::ShaderLib) {
+                                    key.func_name = fe->field;
+                                    key.lib_name  = fe_base->name;
+                                    sig = find_sig(fe->field, fe_base->name);
+                                }
                             }
                         }
 

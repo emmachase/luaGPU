@@ -354,6 +354,102 @@ struct ErrorOverlay {
 
 // ── LuaJIT helpers ────────────────────────────────────────────────────────────
 
+// Upload all user-defined uniforms from a ShaderHandle to the currently bound
+// GL program.  The closure stored in lua_closure_ref is the outer shader()
+// argument; upvalue_index is 1-based as returned by lua_getupvalue.
+static void upload_uniforms(lua_State *L, GLuint prog, const ShaderHandle &h) {
+    if (h.lua_closure_ref == LUA_NOREF) return;
+
+    for (const UniformDesc &u : h.uniforms) {
+        GLint loc = glGetUniformLocation(prog, u.name.c_str());
+        if (loc < 0) continue;
+
+        // Push the closure, fetch the upvalue, then pop the closure.
+        lua_rawgeti(L, LUA_REGISTRYINDEX, h.lua_closure_ref);
+        const char *uv_name = lua_getupvalue(L, -1, u.upvalue_index);
+        lua_remove(L, -2);  // remove closure, leave upvalue on top
+        if (!uv_name) { lua_pop(L, 1); continue; }
+
+        int ltype = lua_type(L, -1);
+        GlslType gt = u.type.tag;
+
+        // ── scalar userdata (float/int/bool wrappers) ──────────────────────
+        if (ltype == LUA_TUSERDATA) {
+            float *fptr = static_cast<float *>(lua_touserdata(L, -1));
+            switch (gt) {
+                case GlslType::Float: glUniform1f(loc, fptr[0]); break;
+                case GlslType::Int:   glUniform1i(loc, static_cast<int>(fptr[0])); break;
+                case GlslType::Bool:  glUniform1i(loc, fptr[0] != 0.f ? 1 : 0); break;
+                case GlslType::Vec2:  glUniform2fv(loc, 1, fptr); break;
+                case GlslType::Vec3:  glUniform3fv(loc, 1, fptr); break;
+                case GlslType::Vec4:  glUniform4fv(loc, 1, fptr); break;
+                case GlslType::IVec2: { int iv[2] = {(int)fptr[0],(int)fptr[1]}; glUniform2iv(loc,1,iv); break; }
+                case GlslType::IVec3: { int iv[3] = {(int)fptr[0],(int)fptr[1],(int)fptr[2]}; glUniform3iv(loc,1,iv); break; }
+                case GlslType::IVec4: { int iv[4] = {(int)fptr[0],(int)fptr[1],(int)fptr[2],(int)fptr[3]}; glUniform4iv(loc,1,iv); break; }
+                case GlslType::Mat2:  glUniformMatrix2fv(loc, 1, GL_FALSE, fptr); break;
+                case GlslType::Mat3:  glUniformMatrix3fv(loc, 1, GL_FALSE, fptr); break;
+                case GlslType::Mat4:  glUniformMatrix4fv(loc, 1, GL_FALSE, fptr); break;
+                default: break;
+            }
+        // ── plain number → float ───────────────────────────────────────────
+        } else if (ltype == LUA_TNUMBER) {
+            glUniform1f(loc, static_cast<float>(lua_tonumber(L, -1)));
+
+        // ── plain boolean → int ────────────────────────────────────────────
+        } else if (ltype == LUA_TBOOLEAN) {
+            glUniform1i(loc, lua_toboolean(L, -1));
+
+        // ── plain table → vecN / matN ──────────────────────────────────────
+        } else if (ltype == LUA_TTABLE) {
+            // Read up to 16 floats from the (possibly nested) table.
+            float vals[16] = {};
+            int n = 0;
+            lua_rawgeti(L, -1, 1);
+            bool nested = lua_istable(L, -1);
+            lua_pop(L, 1);
+
+            if (nested) {
+                // Matrix: rows are sub-tables; fill column-major for OpenGL.
+                int rows = (int)lua_objlen(L, -1);
+                for (int r = 1; r <= rows && r <= 4; ++r) {
+                    lua_rawgeti(L, -1, r);
+                    int cols = (int)lua_objlen(L, -1);
+                    for (int c = 1; c <= cols && c <= 4; ++c) {
+                        lua_rawgeti(L, -1, c);
+                        // OpenGL matN is column-major: index = (c-1)*rows + (r-1)
+                        vals[(c-1)*rows + (r-1)] = (float)lua_tonumber(L, -1);
+                        lua_pop(L, 1);
+                    }
+                    lua_pop(L, 1);
+                    n = rows * rows;
+                }
+            } else {
+                int len = (int)lua_objlen(L, -1);
+                for (int j = 1; j <= len && j <= 4; ++j) {
+                    lua_rawgeti(L, -1, j);
+                    vals[j-1] = (float)lua_tonumber(L, -1);
+                    lua_pop(L, 1);
+                    n = j;
+                }
+            }
+
+            switch (gt) {
+                case GlslType::Vec2:  glUniform2fv(loc, 1, vals); break;
+                case GlslType::Vec3:  glUniform3fv(loc, 1, vals); break;
+                case GlslType::Vec4:  glUniform4fv(loc, 1, vals); break;
+                case GlslType::Mat2:  glUniformMatrix2fv(loc, 1, GL_FALSE, vals); break;
+                case GlslType::Mat3:  glUniformMatrix3fv(loc, 1, GL_FALSE, vals); break;
+                case GlslType::Mat4:  glUniformMatrix4fv(loc, 1, GL_FALSE, vals); break;
+                default: break;
+            }
+            (void)n;
+        }
+
+        lua_pop(L, 1);  // pop upvalue
+    }
+}
+
+
 static ShaderHandle *load_shader_from_lua(lua_State *L, const std::string &lua_path) {
     lua_pushnil(L); lua_setglobal(L, "__luagpu_shader");
     if (luaL_dofile(L, lua_path.c_str()) != 0) {
@@ -537,7 +633,8 @@ int main(int argc, char **argv) {
     overlay.init();
 
     // ── Load initial shader ────────────────────────────────────────────────────
-    GLuint prog = 0;
+    GLuint        prog     = 0;
+    ShaderHandle *g_handle = nullptr;
     std::string error_msg;
 
     auto try_load = [&]() -> bool {
@@ -568,7 +665,8 @@ int main(int argc, char **argv) {
         }
 
         if (prog) glDeleteProgram(prog);
-        prog = new_prog;
+        prog     = new_prog;
+        g_handle = h;
         error_msg.clear();
         log("[luaGPU] Shader loaded ok: %s\n", lua_path.c_str());
         return true;
@@ -634,6 +732,9 @@ int main(int argc, char **argv) {
             if (loc >= 0) glUniform2f(loc,
                 g_win_w > 0 ? static_cast<float>(g_mouse_x) / g_win_w : 0.f,
                 g_win_h > 0 ? 1.f - static_cast<float>(g_mouse_y) / g_win_h : 0.f);
+
+            // Upload user-defined upvalue uniforms.
+            if (g_handle) upload_uniforms(L, prog, *g_handle);
 
             glBindVertexArray(g_vao);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

@@ -61,6 +61,27 @@ static CompileResult compile_src(std::string_view src, const char *name = "test"
     }
 }
 
+// Compile Lua source with a shaderlib; return CompileResult.
+static CompileResult compile_src_with_lib(std::string_view src,
+                                          std::string_view lib_src,
+                                          const char *lib_name,
+                                          const char *name = "test") {
+    try {
+        ShaderFunc sf = Parser::parse(src, name);
+        ShaderLibDesc lib;
+        lib.name     = lib_name;
+        lib.src_text = std::string(lib_src);
+        lib.src_name = lib_name;
+        Compiler c;
+        return c.compile(sf, {}, {lib});
+    } catch (const std::exception &ex) {
+        CompileResult r;
+        r.ok = false;
+        r.errors.push_back({SrcLoc{name, 0}, std::string("exception: ") + ex.what()});
+        return r;
+    }
+}
+
 // Compile and assert it succeeds; return GLSL string.
 static std::string compile_ok(std::string_view src, const char *name = "test") {
     auto r = compile_src(src, name);
@@ -594,6 +615,154 @@ end
     CHECK_CONTAINS(glsl, "vec2(1.0, 2.0)");
 }
 
+// ── shaderlib tests ───────────────────────────────────────────────────────────
+
+// Helper: compile shader source with a single shaderlib and assert success.
+static std::string compile_ok_with_lib(std::string_view src,
+                                        std::string_view lib_src,
+                                        const char *lib_name,
+                                        const char *name = "test") {
+    auto r = compile_src_with_lib(src, lib_src, lib_name, name);
+    if (!r.ok)
+        for (auto &d : r.errors)
+            std::cerr << "  error: " << d.message << "\n";
+    CHECK(r.ok);
+    return r.glsl;
+}
+
+// Helper: compile with a shaderlib and assert failure.
+static std::string compile_fail_with_lib(std::string_view src,
+                                          std::string_view lib_src,
+                                          const char *lib_name,
+                                          const char *name = "test") {
+    auto r = compile_src_with_lib(src, lib_src, lib_name, name);
+    CHECK(!r.ok);
+    std::string msg;
+    for (auto &d : r.errors) { msg += d.message; msg += '\n'; }
+    return msg;
+}
+
+// Basic: a shaderlib function is emitted and callable.
+static void test_shaderlib_basic() {
+    const char *lib_src = R"(
+function()
+    local function square(x)
+        return x * x
+    end
+    return { square = square }
+end
+)";
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local v = mylib.square(uv.x)
+        return vec4(v, 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok_with_lib(src, lib_src, "mylib");
+    // The monomorphized function should appear in the GLSL output.
+    CHECK_CONTAINS(glsl, "square");
+    // Should be called from shader_main.
+    CHECK_CONTAINS(glsl, "square");
+}
+
+// Tree-shaking: only the called function is emitted, not the uncalled one.
+static void test_shaderlib_tree_shaking() {
+    const char *lib_src = R"(
+function()
+    local function used(x)
+        return x * 2.0
+    end
+    local function unused(x)
+        return x * 99.0
+    end
+    return { used = used, unused = unused }
+end
+)";
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local v = noiselib.used(uv.x)
+        return vec4(v, 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok_with_lib(src, lib_src, "noiselib");
+    CHECK_CONTAINS(glsl, "used");
+    // `unused` should not appear in the output at all.
+    CHECK_NOT_CONTAINS(glsl, "unused");
+    CHECK_NOT_CONTAINS(glsl, "99.0");
+}
+
+// Private shaderlib helper (not in the return table) is emitted only if it is
+// called transitively from an exported function.
+static void test_shaderlib_private_helper() {
+    const char *lib_src = R"(
+function()
+    local function private_hash(p)
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
+    end
+    local function noise(p)
+        return private_hash(p)
+    end
+    return { noise = noise }
+end
+)";
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local n = lib.noise(uv)
+        return vec4(n, n, n, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok_with_lib(src, lib_src, "lib");
+    // Both the exported and private helper must appear.
+    CHECK_CONTAINS(glsl, "noise");
+    CHECK_CONTAINS(glsl, "private_hash");
+}
+
+// Shaderlib function called with vec2 argument: monomorphization must resolve
+// param and return types correctly.
+static void test_shaderlib_vec2_arg() {
+    const char *lib_src = R"(
+function()
+    local function len2(p)
+        return length(p)
+    end
+    return { len2 = len2 }
+end
+)";
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local d = mylib.len2(uv)
+        return vec4(d, 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok_with_lib(src, lib_src, "mylib");
+    CHECK_CONTAINS(glsl, "len2");
+    // Return type must be float (used directly in vec4 constructor).
+    CHECK_CONTAINS(glsl, "float");
+}
+
+// Shaderlib parse error is reported as a compilation error.
+static void test_shaderlib_parse_error() {
+    // Deliberately invalid: `=` at top level is a parse error inside the closure.
+    const char *lib_src = "function() = end";
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        return vec4(1.0, 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto msg = compile_fail_with_lib(src, lib_src, "badlib");
+    CHECK_CONTAINS(msg, "badlib");
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 int main() {
     struct Test { const char *name; std::function<void()> fn; };
@@ -629,6 +798,12 @@ int main() {
         {"ivec2_literal_coercion",            test_ivec2_literal_coercion},
         {"ivec3_ivec4_constructor_args",      test_ivec3_ivec4_constructor_args},
         {"float_constructor_still_float",     test_float_constructor_still_float},
+        // shaderlib
+        {"shaderlib_basic",             test_shaderlib_basic},
+        {"shaderlib_tree_shaking",      test_shaderlib_tree_shaking},
+        {"shaderlib_private_helper",    test_shaderlib_private_helper},
+        {"shaderlib_vec2_arg",          test_shaderlib_vec2_arg},
+        {"shaderlib_parse_error",       test_shaderlib_parse_error},
     };
 
     for (auto &t : tests) {

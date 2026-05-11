@@ -22,6 +22,7 @@ struct ShaderHandle {
     std::string              glsl;
     std::vector<UniformDesc> uniforms;
     unsigned int             gl_program = 0;  // filled in by the OpenGL layer
+    int                      lua_closure_ref = LUA_NOREF; // registry ref to outer closure
 };
 
 // ── C API ─────────────────────────────────────────────────────────────────────
@@ -48,5 +49,8 @@ bool extract_source(lua_State *L, int fn_idx,
 
 // ── Upvalue inspection ────────────────────────────────────────────────────────
 // Walk the upvalues of the function at fn_idx, identify uniforms (via
-// constructor metatable tags) and shaderlib references.
-std::vector<UniformDesc> inspect_upvalues(lua_State *L, int fn_idx);
+// constructor metatable tags) and shaderlib references (__is_shaderlib tables).
+// Uniforms are appended to out_uniforms; shaderlibs to out_libs.
+void inspect_upvalues(lua_State *L, int fn_idx,
+                      std::vector<UniformDesc>    &out_uniforms,
+                      std::vector<ShaderLibDesc>  &out_libs);

@@ -27,7 +27,11 @@ static const char *MT_SHADER    = "luagpu.ShaderHandle";
 
 static int shader_handle_gc(lua_State *L) {
     ShaderHandle *h = static_cast<ShaderHandle *>(lua_touserdata(L, 1));
-    if (h) h->~ShaderHandle();
+    if (h) {
+        if (h->lua_closure_ref != LUA_NOREF)
+            luaL_unref(L, LUA_REGISTRYINDEX, h->lua_closure_ref);
+        h->~ShaderHandle();
+    }
     return 0;
 }
 
@@ -107,9 +111,82 @@ bool extract_source(lua_State *L, int fn_idx,
 
 // ── inspect_upvalues ──────────────────────────────────────────────────────────
 
-std::vector<UniformDesc> inspect_upvalues(lua_State *L, int fn_idx) {
-    std::vector<UniformDesc> uniforms;
+// Attempt to classify a plain Lua table (at stack top) as a vecN or matN type.
+// Returns GlslType::Unknown if it doesn't match.
+// On bad content (non-numeric elements, non-square nested arrays) calls
+// luaL_error(), which throws — caller must not pop the value after this.
+static GlslType classify_table(lua_State *L, const char *upvalue_name) {
+    // Check if it looks like a nested (matrix) table: first element is a table.
+    lua_rawgeti(L, -1, 1);
+    bool first_is_table = lua_istable(L, -1);
+    lua_pop(L, 1);
 
+    int outer_len = (int)lua_objlen(L, -1);
+
+    if (first_is_table) {
+        // Nested table — must be 2×2, 3×3, or 4×4 of numbers.
+        if (outer_len < 2 || outer_len > 4)
+            return GlslType::Unknown;  // not a recognised mat size
+
+        for (int row = 1; row <= outer_len; ++row) {
+            lua_rawgeti(L, -1, row);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 1);
+                luaL_error(L, "upvalue '%s': expected a square table of tables "
+                              "(mat2/mat3/mat4) but row %d is not a table",
+                              upvalue_name, row);
+            }
+            int col_len = (int)lua_objlen(L, -1);
+            if (col_len != outer_len) {
+                lua_pop(L, 1);
+                luaL_error(L, "upvalue '%s': matrix table is not square "
+                              "(%dx%d)", upvalue_name, outer_len, col_len);
+            }
+            for (int col = 1; col <= col_len; ++col) {
+                lua_rawgeti(L, -1, col);
+                if (!lua_isnumber(L, -1)) {
+                    lua_pop(L, 2);
+                    luaL_error(L, "upvalue '%s': matrix element [%d][%d] "
+                                  "is not a number", upvalue_name, row, col);
+                }
+                lua_pop(L, 1);
+            }
+            lua_pop(L, 1);  // pop row table
+        }
+
+        switch (outer_len) {
+            case 2: return GlslType::Mat2;
+            case 3: return GlslType::Mat3;
+            case 4: return GlslType::Mat4;
+        }
+    } else {
+        // Flat table — must be 2, 3, or 4 numbers → vecN.
+        if (outer_len < 2 || outer_len > 4)
+            return GlslType::Unknown;
+
+        for (int j = 1; j <= outer_len; ++j) {
+            lua_rawgeti(L, -1, j);
+            if (!lua_isnumber(L, -1)) {
+                lua_pop(L, 1);
+                luaL_error(L, "upvalue '%s': vec table element [%d] "
+                              "is not a number", upvalue_name, j);
+            }
+            lua_pop(L, 1);
+        }
+
+        switch (outer_len) {
+            case 2: return GlslType::Vec2;
+            case 3: return GlslType::Vec3;
+            case 4: return GlslType::Vec4;
+        }
+    }
+    return GlslType::Unknown;
+}
+
+
+void inspect_upvalues(lua_State *L, int fn_idx,
+                      std::vector<UniformDesc>   &out_uniforms,
+                      std::vector<ShaderLibDesc> &out_libs) {
     for (int i = 1; ; ++i) {
         const char *name = lua_getupvalue(L, fn_idx, i);
         if (!name) break;  // no more upvalues
@@ -148,6 +225,15 @@ std::vector<UniformDesc> inspect_upvalues(lua_State *L, int fn_idx) {
                 }
             }
 
+        } else if (ltype == LUA_TNUMBER) {
+            // Plain Lua numbers are treated as float uniforms.
+            // (LuaJIT also has integer subtypes but lua_tointeger would truncate;
+            // GLSL shaders overwhelmingly expect float for scalar upvalues.)
+            ty = TypeInfo::make(GlslType::Float);
+
+        } else if (ltype == LUA_TBOOLEAN) {
+            ty = TypeInfo::make(GlslType::Bool);
+
         } else if (ltype == LUA_TNIL) {
             // Nil upvalue at compile time — will be caught by the compiler
             // as an undefined binding; skip silently here and let the
@@ -156,9 +242,41 @@ std::vector<UniformDesc> inspect_upvalues(lua_State *L, int fn_idx) {
             continue;
 
         } else if (ltype == LUA_TTABLE) {
-            // Could be a shaderlib — handled separately; skip as uniform.
-            lua_pop(L, 1);
-            continue;
+            // Check if this is a shaderlib table (__is_shaderlib == true).
+            lua_getfield(L, -1, "__is_shaderlib");
+            bool is_shaderlib = lua_toboolean(L, -1) != 0;
+            lua_pop(L, 1);  // pop __is_shaderlib value
+
+            if (is_shaderlib) {
+                ShaderLibDesc desc;
+                desc.name = name;
+
+                lua_getfield(L, -1, "__source");
+                const char *src = lua_tostring(L, -1);
+                desc.src_text = src ? src : "";
+                lua_pop(L, 1);
+
+                lua_getfield(L, -1, "__src_name");
+                const char *sname = lua_tostring(L, -1);
+                desc.src_name = sname ? sname : name;
+                lua_pop(L, 1);
+
+                out_libs.push_back(std::move(desc));
+                // Whether shaderlib or unrecognized table, skip as a uniform.
+                lua_pop(L, 1);
+                continue;
+            }
+
+            // Not a shaderlib — try to classify as vecN / matN.
+            GlslType tgt = classify_table(L, name);  // may luaL_error
+            if (tgt != GlslType::Unknown) {
+                ty = TypeInfo::make(tgt);
+                // Fall through to the UniformDesc push below.
+            } else {
+                // Unrecognised table — skip.
+                lua_pop(L, 1);
+                continue;
+            }
         }
 
         if (ty.tag == GlslType::Unknown) {
@@ -171,12 +289,10 @@ std::vector<UniformDesc> inspect_upvalues(lua_State *L, int fn_idx) {
         ud.name          = name;
         ud.type          = ty;
         ud.upvalue_index = i;
-        uniforms.push_back(std::move(ud));
+        out_uniforms.push_back(std::move(ud));
 
         lua_pop(L, 1);
     }
-
-    return uniforms;
 }
 
 // ── lua_shader ────────────────────────────────────────────────────────────────
@@ -192,8 +308,10 @@ int lua_shader(lua_State *L) {
         return 0;
     }
 
-    // 2. Inspect upvalues for uniforms (and shaderlib refs).
-    std::vector<UniformDesc> uniforms = inspect_upvalues(L, 1);
+    // 2. Inspect upvalues for uniforms and shaderlib references.
+    std::vector<UniformDesc>   uniforms;
+    std::vector<ShaderLibDesc> shaderlibs;
+    inspect_upvalues(L, 1, uniforms, shaderlibs);
 
     // 3. Parse (Parser takes the source text directly).
     ShaderFunc sf;
@@ -206,7 +324,7 @@ int lua_shader(lua_State *L) {
 
     // 4. Compile.
     Compiler compiler;
-    CompileResult result = compiler.compile(sf, uniforms);
+    CompileResult result = compiler.compile(sf, uniforms, shaderlibs);
 
     if (!result.ok) {
         // Collect all errors into one string.
@@ -222,6 +340,12 @@ int lua_shader(lua_State *L) {
     ShaderHandle handle;
     handle.glsl     = std::move(result.glsl);
     handle.uniforms = std::move(result.uniforms);
+
+    // Keep a registry reference to the outer closure so the render loop can
+    // call lua_getupvalue on it each frame to read current uniform values.
+    lua_pushvalue(L, 1);                       // push closure
+    handle.lua_closure_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
     push_shader_handle(L, std::move(handle));
     return 1;
 }
