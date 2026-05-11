@@ -437,7 +437,32 @@ TypeInfo Compiler::type_call(const CallExpr &call, const SrcLoc &loc,
     if (auto *ne = std::get_if<NameExpr>(&call.callee->kind)) {
         const Binding *b = sym.lookup(ne->name);
         if (!b) { emit_error(loc, "call to undefined '" + ne->name + "'"); return TypeInfo::unknown(); }
-        if (b->kind == BindingKind::Constructor) return b->type;
+        if (b->kind == BindingKind::Constructor) {
+            // Constrain any tvar arguments to the scalar element type expected by
+            // this constructor.  For example, ivec2(x) requires int arguments, so
+            // a bare numeric literal `3` (whose tvar defaults to Float) is tightened
+            // to Int here, causing the emitter to output `3` rather than `3.0`.
+            GlslType ret = b->type.tag;
+            GlslType expected = GlslType::Unknown;
+            if (ret == GlslType::Int || is_int_vec(ret))
+                expected = GlslType::Int;
+            else if (ret == GlslType::Float || is_float_vec(ret))
+                expected = GlslType::Float;
+            else if (ret == GlslType::Bool)
+                expected = GlslType::Bool;
+            if (expected != GlslType::Unknown) {
+                TypeInfo exp_ti = TypeInfo::make(expected);
+                for (auto &a : call.args) {
+                    TypeInfo at = ctx.expr_types.count(a.get()) ? ctx.expr_types.at(a.get()) : TypeInfo::unknown();
+                    if (at.is_tvar()) {
+                        TypeInfo ex;
+                        ctx.uf.constrain(at.tvar_id, exp_ti, ex);
+                        ctx.expr_types[a.get()] = ctx.uf.resolve(at);
+                    }
+                }
+            }
+            return b->type;
+        }
         if (b->kind == BindingKind::StructType) {
             // Named struct constructor: Ray { origin = vec3(...), dir = vec3(...) }
             // The single argument must be a TableExpr; its fields are already
@@ -568,7 +593,13 @@ TypeInfo Compiler::type_binop(int op, TypeInfo lhs, TypeInfo rhs,
         return lhs;
     }
     if (lhs.is_tvar()) { TypeInfo ex; ctx.uf.constrain(lhs.tvar_id, rhs, ex); return rhs; }
-    if (rhs.is_tvar()) { TypeInfo ex; ctx.uf.constrain(rhs.tvar_id, lhs, ex); return lhs; }
+    if (rhs.is_tvar()) {
+        // Constrain the scalar literal to match the scalar base of lhs (e.g. ivec2
+        // + tvar → tvar must be Int, not Float).
+        TypeInfo scalar_lhs = is_vec(lhs.tag) ? TypeInfo::make(vec_scalar(lhs.tag)) : lhs;
+        TypeInfo ex; ctx.uf.constrain(rhs.tvar_id, scalar_lhs, ex);
+        return lhs;
+    }
 
     lhs = ctx.uf.resolve(lhs);
     rhs = ctx.uf.resolve(rhs);

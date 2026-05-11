@@ -43,11 +43,15 @@ bool UnionFind::constrain(int var, TypeInfo ty, TypeInfo &existing) {
     int root = find(var);
     TNode &n = nodes_[root];
     if (n.is_resolved) {
-        if (n.concrete != ty) {
-            existing = n.concrete;
-            return false;
+        if (n.concrete == ty) return true;
+        // Allow a Float-defaulted numeric literal tvar to be tightened to Int
+        // when context (e.g. `int(3) + 1`) demands it.
+        if (n.concrete.tag == GlslType::Float && ty.tag == GlslType::Int) {
+            n.concrete = ty;
+            return true;
         }
-        return true;
+        existing = n.concrete;
+        return false;
     }
     n.concrete    = ty;
     n.is_resolved = true;

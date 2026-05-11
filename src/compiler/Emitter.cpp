@@ -338,9 +338,18 @@ std::string Emitter::expr_str(const Expr &e) {
         if constexpr (std::is_same_v<T, NumberLit>) {
             double v = ek.value;
             std::ostringstream ss;
-            // Emit with decimal point so GLSL treats it as a float literal.
-            if (v == (long long)v) ss << (long long)v << ".0";
-            else                   ss << v;
+            // If the literal's resolved type is int (constrained by context, e.g.
+            // `int(3) + 1`), emit without a decimal point so GLSL treats it as an
+            // integer literal.  Otherwise emit with a decimal point for float.
+            TypeInfo ty = resolved(e);
+            if (ty.is_tvar()) ty = uf_->resolve(ty);
+            bool is_int = (ty.tag == GlslType::Int);
+            if (v == (long long)v) {
+                ss << (long long)v;
+                if (!is_int) ss << ".0";
+            } else {
+                ss << v;
+            }
             return ss.str();
 
         } else if constexpr (std::is_same_v<T, BoolLit>) {

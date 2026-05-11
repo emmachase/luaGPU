@@ -388,7 +388,7 @@ static void test_example_raymarcher() {
     std::string src = read_file("examples/raymarcher.lua");
     CHECK(!src.empty());
     if (src.empty()) return;
-    compile_ok(src, "raymarcher");
+    std::cout << compile_ok(src, "raymarcher");
 }
 
 static void test_example_voronoi() {
@@ -511,6 +511,89 @@ end
     CHECK(msg.find("missing field 'dir'") != std::string::npos);
 }
 
+// ── Integer literal type coercion tests ───────────────────────────────────────
+
+// int(3) + 1  →  the literal `1` must be emitted as an integer (no `.0`)
+static void test_int_literal_coercion_binop() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local x = int(3) + 1
+        return vec4(float(x), 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "int_literal_coercion_binop");
+    // Must not mix int and float in the addition
+    CHECK_CONTAINS(glsl, "int(3) + 1");
+    CHECK_NOT_CONTAINS(glsl, "int(3) + 1.0");
+    CHECK_NOT_CONTAINS(glsl, "int(3.0)");
+}
+
+// int(n) constructor: numeric literal arg must not get a `.0` suffix
+static void test_int_constructor_arg() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local x = int(7)
+        return vec4(float(x), 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "int_constructor_arg");
+    CHECK_CONTAINS(glsl, "int(7)");
+    CHECK_NOT_CONTAINS(glsl, "int(7.0)");
+}
+
+// ivec2(3): constructor arg must be integer, and `+ 1` must also be integer
+static void test_ivec2_literal_coercion() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local x = ivec2(3) + 1
+        return vec4(float(x.x), 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "ivec2_literal_coercion");
+    CHECK_CONTAINS(glsl, "ivec2(3)");
+    CHECK_NOT_CONTAINS(glsl, "ivec2(3.0)");
+    // The scalar `1` added to an ivec2 must be an integer literal, not 1.0
+    CHECK_NOT_CONTAINS(glsl, "+ 1.0");
+}
+
+// ivec3 and ivec4 constructor args must also be coerced to int
+static void test_ivec3_ivec4_constructor_args() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local a = ivec3(1, 2, 3)
+        local b = ivec4(4, 5, 6, 7)
+        return vec4(float(a.x) + float(b.x), 0.0, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "ivec3_ivec4_constructor_args");
+    CHECK_CONTAINS(glsl, "ivec3(1, 2, 3)");
+    CHECK_NOT_CONTAINS(glsl, "ivec3(1.0");
+    CHECK_CONTAINS(glsl, "ivec4(4, 5, 6, 7)");
+    CHECK_NOT_CONTAINS(glsl, "ivec4(4.0");
+}
+
+// Plain float constructors must still emit float literals (regression guard)
+static void test_float_constructor_still_float() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        local x = vec2(1, 2)
+        return vec4(x.x, x.y, 0.0, 1.0)
+    end
+end
+)";
+    auto glsl = compile_ok(src, "float_constructor_still_float");
+    CHECK_CONTAINS(glsl, "vec2(1.0, 2.0)");
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 int main() {
     struct Test { const char *name; std::function<void()> fn; };
@@ -541,6 +624,11 @@ int main() {
         {"named_struct_mixed_anonymous", test_named_struct_mixed_anonymous},
         {"named_struct_error_unknown_field",  test_named_struct_error_unknown_field},
         {"named_struct_error_missing_field",  test_named_struct_error_missing_field},
+        {"int_literal_coercion_binop",        test_int_literal_coercion_binop},
+        {"int_constructor_arg",               test_int_constructor_arg},
+        {"ivec2_literal_coercion",            test_ivec2_literal_coercion},
+        {"ivec3_ivec4_constructor_args",      test_ivec3_ivec4_constructor_args},
+        {"float_constructor_still_float",     test_float_constructor_still_float},
     };
 
     for (auto &t : tests) {

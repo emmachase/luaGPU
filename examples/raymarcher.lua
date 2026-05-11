@@ -121,6 +121,8 @@ local myShader = shader(function(u_time, u_resolution)
         local pos = ro + rd * t
         local n   = normal(pos)
 
+        local x = ivec2(3) + 1
+
         -- Light direction (animated).
         local ld = normalize(vec3(sin(u_time * 0.5), 1.5, cos(u_time * 0.5)))
 
