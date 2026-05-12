@@ -27,6 +27,8 @@ int main() {
         { "voronoi",       "examples/voronoi.lua"       },
         { "fbm_landscape", "examples/fbm_landscape.lua" },
         { "struct_test",   "examples/struct_test.lua"   },
+        { "octgrams",      "examples/octgrams.lua"      },
+        { "creature",      "examples/creature.lua"      },
     };
 
     int failures = 0;

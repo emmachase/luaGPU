@@ -84,3 +84,18 @@ target_compile_options(emit_examples PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
 )
+
+# ── Snapshot tool ──────────────────────────────────────────────────────────────
+# Headless one-frame render → 16-colour quantized PPM + palette on stdout.
+add_executable(snapshot tools/snapshot.cpp)
+target_include_directories(snapshot PRIVATE src/host src/compiler)
+target_link_libraries(snapshot PRIVATE
+    host
+    OpenGL::GL
+    glfw
+    glad::glad
+)
+target_compile_options(snapshot PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
+)

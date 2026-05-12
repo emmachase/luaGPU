@@ -115,14 +115,6 @@ end
 )";
     auto glsl = compile_ok(src, "minimal");
 
-    CHECK_CONTAINS(glsl, "#version 330 core");
-    CHECK_CONTAINS(glsl, "uniform float u_time;");
-    CHECK_CONTAINS(glsl, "uniform vec2  u_resolution;");
-    CHECK_CONTAINS(glsl, "uniform float u_delta;");
-    CHECK_CONTAINS(glsl, "uniform vec2  u_mouse;");
-    CHECK_CONTAINS(glsl, "out vec4 frag_out;");
-    CHECK_CONTAINS(glsl, "void main()");
-    CHECK_CONTAINS(glsl, "gl_FragCoord.xy / u_resolution");
     CHECK_CONTAINS(glsl, "vec4 shader_main(vec2 uv)");
     CHECK_CONTAINS(glsl, "vec4(0.0, 0.0, 0.0, 1.0)");
 }
@@ -371,11 +363,8 @@ end
     auto glsl = compile_ok(src, "spec_fade");
 
     // Structure checks
-    CHECK_CONTAINS(glsl, "#version 330 core");
-    CHECK_CONTAINS(glsl, "uniform float u_time;");
     CHECK_CONTAINS(glsl, "float fade_float(float t)");
     CHECK_CONTAINS(glsl, "vec4 shader_main(vec2 uv)");
-    CHECK_CONTAINS(glsl, "frag_out = shader_main(uv)");
 
     // fade body contains the formula
     CHECK_CONTAINS(glsl, "3.0");

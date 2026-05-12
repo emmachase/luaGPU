@@ -49,6 +49,13 @@ struct Scope {
         return nullptr;
     }
 
+    Binding *lookup_mutable(const std::string &name) {
+        auto it = bindings.find(name);
+        if (it != bindings.end()) return &it->second;
+        if (parent) return parent->lookup_mutable(name);
+        return nullptr;
+    }
+
     void define(Binding b) {
         bindings[b.name] = std::move(b);
     }
@@ -73,6 +80,11 @@ public:
     // Look up a name, walking parent chain
     const Binding *lookup(const std::string &name) const {
         return current_->lookup(name);
+    }
+
+    // Mutable lookup — for updating a binding's type after assignment
+    Binding *lookup_mutable(const std::string &name) {
+        return current_->lookup_mutable(name);
     }
 
     // Define in current scope

@@ -31,6 +31,10 @@ struct StructDef {
 // the same AST nodes are typed differently per instantiation.
 using ExprTypeMap = std::unordered_map<const Expr *, TypeInfo>;
 
+// Maps Stmt* → TypeInfo for uninitialised LocalStmt declarations whose type is
+// inferred from the first AssignStmt that targets them.
+using StmtTypeMap = std::unordered_map<const Stmt *, TypeInfo>;
+
 // ── Uniform descriptor (for the host) ─────────────────────────────────────────
 struct UniformDesc {
     std::string name;
@@ -87,6 +91,7 @@ struct MonoInstance {
     std::vector<TypeInfo>    param_types;
     const Block             *body;           // pointer into shader AST (not owned)
     ExprTypeMap              expr_types;     // type annotation for THIS instantiation
+    StmtTypeMap              stmt_types;     // type for uninitialised LocalStmt nodes
     UnionFind                uf;             // union-find for THIS instantiation
     CallNameMap              call_names;     // CallExpr* → emitted function name
 };
@@ -174,6 +179,12 @@ private:
         std::vector<StructDef> &structs;
         // Maps user-defined struct name → struct_id (populated by type_stmt on StructDeclStmt)
         std::unordered_map<std::string, int> &named_structs;
+        // Optional: records inferred types for uninitialised LocalStmt nodes so the
+        // emitter can emit the correct declaration type without re-running inference.
+        StmtTypeMap *stmt_types = nullptr;
+        // Tracks uninitialised LocalStmt nodes by variable name so AssignStmt can
+        // back-fill their type in stmt_types.
+        std::unordered_map<std::string, const Stmt *> uninit_local_stmts;
     };
 
     TypeInfo type_expr (const Expr &e, SymbolTable &sym, TypeCtx &ctx);

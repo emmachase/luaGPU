@@ -241,6 +241,11 @@ void Compiler::type_stmt(const Stmt &s, SymbolTable &sym, TypeCtx &ctx) {
             if (sk.init) ty = type_expr(**sk.init, sym, ctx);
             Binding b; b.name = sk.name; b.kind = BindingKind::Local; b.type = ty;
             sym.define(std::move(b));
+            // Track uninitialised locals so AssignStmt can back-fill their type.
+            if (!sk.init && ctx.stmt_types) {
+                ctx.stmt_types->emplace(&s, TypeInfo::unknown());
+                ctx.uninit_local_stmts[sk.name] = &s;
+            }
 
         } else if constexpr (std::is_same_v<T, LocalFuncStmt>) {
             // Body is type-checked on demand per instantiation in pass 4.
@@ -251,7 +256,24 @@ void Compiler::type_stmt(const Stmt &s, SymbolTable &sym, TypeCtx &ctx) {
             sym.define(std::move(b));
 
         } else if constexpr (std::is_same_v<T, AssignStmt>) {
-            type_expr(*sk.value, sym, ctx);
+            TypeInfo val_ty = type_expr(*sk.value, sym, ctx);
+            // If the target local was declared without an initializer its type is
+            // still Unknown.  Propagate the first assigned type (concrete or tvar)
+            // so downstream uses (e.g. `return mix(refl_col, trans_col, f)`) can
+            // resolve correctly.  We accept tvars too — parameter types start as
+            // tvars and get resolved concretely only during the per-instance pass.
+            if (!val_ty.is_unknown()) {
+                Binding *b = sym.lookup_mutable(sk.target);
+                if (b && b->kind == BindingKind::Local && b->type.is_unknown()) {
+                    b->type = val_ty;
+                    // Back-fill the stmt_types entry for the LocalStmt declaration.
+                    if (ctx.stmt_types) {
+                        auto it = ctx.uninit_local_stmts.find(sk.target);
+                        if (it != ctx.uninit_local_stmts.end())
+                            (*ctx.stmt_types)[it->second] = val_ty;
+                    }
+                }
+            }
 
         } else if constexpr (std::is_same_v<T, ExprStmt>) {
             type_expr(*sk.expr, sym, ctx);
@@ -1099,8 +1121,12 @@ TypeInfo Compiler::typecheck_instance(MonoInstance &inst, SymbolTable &base_sym)
 
     // Run type inference on the body using this instance's own ctx.
     TypeCtx inst_ctx{inst.expr_types, inst.uf, next_struct_id_, structs_, named_structs_};
+    inst_ctx.stmt_types = &inst.stmt_types;
     type_block(*inst.body, sym, inst_ctx);
     pass3_solve(inst_ctx);
+    // Resolve any tvar stmt_types entries to concrete types.
+    for (auto &[sp, ti] : inst.stmt_types)
+        if (ti.is_tvar()) ti = inst.uf.resolve(ti);
 
     // Find return type from the return statement.
     TypeInfo ret = TypeInfo::make(GlslType::Void);

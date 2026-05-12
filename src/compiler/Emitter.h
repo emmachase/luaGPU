@@ -24,6 +24,7 @@ private:
     std::ostringstream out_;
     // Pointer to the current instance's type map + union-find, set per function.
     const ExprTypeMap *expr_types_ = nullptr;
+    const StmtTypeMap *stmt_types_ = nullptr;
     UnionFind         *uf_         = nullptr;
     const CallNameMap *call_names_ = nullptr;
     // All helper instances (for return-type lookup when local init type is Unknown).

@@ -141,9 +141,11 @@ std::string Emitter::emit(
 void Emitter::emit_instance(const MonoInstance &inst, bool is_entry) {
     // Switch the per-expression context to this instance.
     const ExprTypeMap *prev_et = expr_types_;
+    const StmtTypeMap *prev_st = stmt_types_;
     UnionFind         *prev_uf = uf_;
     const CallNameMap *prev_cn = call_names_;
     expr_types_ = &inst.expr_types;
+    stmt_types_ = &inst.stmt_types;
     // UnionFind is per-instance but we only need resolve(); cast away const
     // because UnionFind::resolve is not const (path compression).
     uf_ = const_cast<UnionFind *>(&inst.uf);
@@ -174,6 +176,7 @@ void Emitter::emit_instance(const MonoInstance &inst, bool is_entry) {
     line();
 
     expr_types_ = prev_et;
+    stmt_types_ = prev_st;
     uf_         = prev_uf;
     call_names_ = prev_cn;
 }
@@ -217,6 +220,14 @@ void Emitter::emit_stmt(const Stmt &s) {
                     if (ty.tag == GlslType::Unknown)
                         ty = resolved_call_return(init_expr);
                     if (ty.tag == GlslType::Unknown) ty = TypeInfo::make(GlslType::Float);
+                }
+            } else {
+                // No initializer: look up the type inferred from the first AssignStmt
+                // that targets this variable (recorded in stmt_types_ during type inference).
+                if (stmt_types_) {
+                    auto it = stmt_types_->find(&s);
+                    if (it != stmt_types_->end() && !it->second.is_unknown())
+                        ty = it->second;
                 }
             }
             std::string decl = type_str(ty) + " " + sk.name;
@@ -429,20 +440,43 @@ std::string Emitter::expr_str(const Expr &e) {
             // genType builtins that require all args to be the same vector type.
             // If any arg is a float vector and another is a plain float scalar,
             // promote the scalar to vecN(x).
-            static const char *gentype_builtins[] = {
-                "pow", "clamp", "mix", "smoothstep", "step", "min", "max",
-                "mod", "fma", nullptr
+            // scalar_tail: number of trailing args that are valid as plain scalars
+            // even when the other args are vectors (GLSL scalar-overload arguments).
+            //   mix(genType, genType, float t)        → scalar_tail = 1
+            //   clamp(genType, float min, float max)  → scalar_tail = 2
+            //   smoothstep(float e0, float e1, genType) → scalar_tail = 0 (first 2 are scalar bounds, but they already won't be vec)
+            // For all others scalar_tail = 0 (broadcast all args).
+            struct GenTypeSpec { const char *name; int scalar_tail; };
+            static const GenTypeSpec gentype_builtins[] = {
+                {"pow",        0},
+                {"clamp",      2},
+                {"mix",        1},
+                {"smoothstep", 0},
+                {"step",       0},
+                {"min",        0},
+                {"max",        0},
+                {"mod",        0},
+                {"fma",        0},
+                {nullptr,      0}
             };
-            bool is_gentype = false;
-            for (int gi = 0; gentype_builtins[gi]; ++gi) {
-                if (callee_name == gentype_builtins[gi]) { is_gentype = true; break; }
+            bool is_gentype   = false;
+            int  scalar_tail  = 0;
+            for (int gi = 0; gentype_builtins[gi].name; ++gi) {
+                if (callee_name == gentype_builtins[gi].name) {
+                    is_gentype  = true;
+                    scalar_tail = gentype_builtins[gi].scalar_tail;
+                    break;
+                }
             }
 
-            // Find the widest float-vector type among the args (if any).
+            // Find the widest float-vector type among the broadcastable args (if any).
+            // Exclude trailing scalar_tail args from the scan — they are valid as
+            // plain scalars regardless of the other argument types.
             GlslType vec_type = GlslType::Unknown;
             if (is_gentype) {
-                for (auto &a : ek.args) {
-                    TypeInfo at = resolved(*a);
+                int broadcast_argc = (int)ek.args.size() - scalar_tail;
+                for (int ai = 0; ai < broadcast_argc; ++ai) {
+                    TypeInfo at = resolved(*ek.args[ai]);
                     if (at.is_tvar()) at = uf_->resolve(at);
                     if (is_float_vec(at.tag)) {
                         if (vec_type == GlslType::Unknown ||
@@ -455,7 +489,10 @@ std::string Emitter::expr_str(const Expr &e) {
             std::string s = callee_name + "(";
             for (size_t i = 0; i < ek.args.size(); ++i) {
                 if (i > 0) s += ", ";
-                if (is_gentype && is_float_vec(vec_type))
+                // Only broadcast args that are not in the scalar tail.
+                bool do_broadcast = is_gentype && is_float_vec(vec_type) &&
+                                    (int)i < (int)ek.args.size() - scalar_tail;
+                if (do_broadcast)
                     s += expr_str_broadcast(*ek.args[i], vec_type);
                 else
                     s += expr_str(*ek.args[i]);
