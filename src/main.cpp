@@ -656,7 +656,26 @@ int main(int argc, char **argv) {
         }
 
         std::string gl_err;
-        GLuint new_prog = link_program(h->glsl, gl_err);
+        // Wrap the emitter output (which contains only uniforms + functions)
+        // in the boilerplate that the standalone demo needs.
+        std::string wrapped_glsl =
+            "#version 330 core\n"
+            "\n"
+            "// built-in uniforms\n"
+            "uniform vec2  u_resolution;\n"
+            "uniform float u_time;\n"
+            "uniform float u_delta;\n"
+            "uniform vec2  u_mouse;\n"
+            "\n"
+            "out vec4 frag_out;\n"
+            "\n"
+            + h->glsl +
+            "\n"
+            "void main() {\n"
+            "    vec2 uv = gl_FragCoord.xy / u_resolution;\n"
+            "    frag_out = shader_main(uv);\n"
+            "}\n";
+        GLuint new_prog = link_program(wrapped_glsl, gl_err);
         if (!new_prog) {
             error_msg = "GLSL link error:\n" + gl_err;
             log("[luaGPU] OpenGL link error:\n%s\n", gl_err.c_str());

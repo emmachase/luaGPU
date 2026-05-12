@@ -7,7 +7,10 @@
 
 class Emitter {
 public:
-    // Emit the complete GLSL shader string.
+    // Emit the GLSL shader body — user uniforms, structs, helper functions,
+    // and the entry function (shader_main).  No #version, no built-in
+    // uniforms, no frag_out, no void main() — those are the host's
+    // responsibility.
     // mono_order: callee-before-caller order of helper function instances.
     // entry:      the shader_main instance (already in mono_registry, NOT in mono_order).
     std::string emit(

@@ -57,23 +57,11 @@ std::string Emitter::emit(
     const std::vector<MonoInstance *> &mono_order,
     const MonoInstance                &entry)
 {
-    (void)sf; // ShaderFunc not needed — all info comes from instances
+    (void)sf;
     mono_order_ = &mono_order;
     structs_    = &structs;
 
-    // 1. Version
-    line("#version 330 core");
-    line();
-
-    // 2. Built-in uniforms (always emitted)
-    line("// built-in uniforms");
-    line("uniform vec2  u_resolution;");
-    line("uniform float u_time;");
-    line("uniform float u_delta;");
-    line("uniform vec2  u_mouse;");
-    line();
-
-    // 3. User uniforms
+    // 1. User uniforms
     if (!uniforms.empty()) {
         line("// user uniforms");
         for (auto &u : uniforms)
@@ -142,26 +130,7 @@ std::string Emitter::emit(
         line();
     }
 
-    // 7. void main() wrapper
-    line("out vec4 frag_out;");
-    line();
-    line("void main() {");
-    indent_push();
-    line("vec2 uv = gl_FragCoord.xy / u_resolution;");
-    {
-        std::string call = "frag_out = shader_main(";
-        for (size_t i = 0; i < entry.param_names.size(); ++i) {
-            if (i > 0) call += ", ";
-            call += entry.param_names[i];
-        }
-        call += ");";
-        line(call);
-    }
-    indent_pop();
-    line("}");
-    line();
-
-    // 8. shader_main definition
+    // 7. shader_main definition
     emit_instance(entry, true);
 
     return out_.str();
