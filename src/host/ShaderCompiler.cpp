@@ -45,6 +45,14 @@ static void push_shader_handle(lua_State *L, ShaderHandle &&h) {
     lua_setmetatable(L, -2);
 }
 
+// ── Path resolver ─────────────────────────────────────────────────────────────
+
+static PathResolverFn g_path_resolver = nullptr;
+
+void set_path_resolver(PathResolverFn fn) {
+    g_path_resolver = fn;
+}
+
 // ── extract_source ────────────────────────────────────────────────────────────
 
 bool extract_source(lua_State *L, int fn_idx,
@@ -69,9 +77,17 @@ bool extract_source(lua_State *L, int fn_idx,
     line_end   = ar.lastlinedefined;
 
     if (ar.source[0] == '@') {
-        // Source is a file path.
+        // Source is a file path — may be a virtual engine path.
         std::string path(ar.source + 1);
         src_name = path;
+
+        // Resolve through the host engine's VFS if a resolver is registered.
+        if (g_path_resolver) {
+            char resolved[4096];
+            if (g_path_resolver(path.c_str(), resolved, sizeof(resolved)))
+                path = resolved;
+        }
+
         std::ifstream f(path);
         if (!f.is_open()) {
             err_msg = "cannot open source file: " + path;

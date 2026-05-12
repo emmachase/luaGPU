@@ -37,6 +37,20 @@ int lua_shaderlib(lua_State *L);
 // Register both functions into the global Lua environment.
 void register_shader_functions(lua_State *L);
 
+// ── Path resolver hook ────────────────────────────────────────────────────────
+// Optional callback invoked when extract_source needs to open a file whose
+// path came from debug.getinfo (i.e. a virtual/engine path).  The callback
+// receives the raw path string and should write the resolved host-OS path into
+// out_path (max out_size bytes including NUL).  Return true on success, false
+// to fall back to using the raw path unchanged.
+//
+// Register once at engine startup before any shader() calls are made.
+// Pass nullptr to clear a previously registered resolver.
+using PathResolverFn = bool(*)(const char *virtual_path,
+                               char       *out_path,
+                               size_t      out_size);
+void set_path_resolver(PathResolverFn fn);
+
 // ── Source extraction ─────────────────────────────────────────────────────────
 // Extract the source text of a Lua function using debug.getinfo.
 // Returns false and sets err_msg on failure (e.g. source is a C function).
