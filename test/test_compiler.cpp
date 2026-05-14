@@ -375,6 +375,29 @@ end
     CHECK(p_fade < p_main);
 }
 
+// ── spec example: alternate shader ──────────────────────────────────────────────────
+static void test_spec_alternate_shader() {
+    const char *src = R"(
+function(u_time, u_resolution)
+    return function main(uv)
+        if uv.x > 0.5 then
+            return vec4(1.0, 0.0, 0.0, 1.0)
+        else
+            return vec4(0.0, 0.0, 1.0, 1.0)
+        end
+    end
+end
+)";
+    auto glsl = compile_ok(src, "spec_alternate");
+    std::cout << glsl << "\n";
+
+    // Structure checks
+    CHECK_CONTAINS(glsl, "vec4 shader_main(vec2 uv)");
+
+    // if statement should be present
+    CHECK_CONTAINS(glsl, "if (");
+}
+
 // ── example shader file tests ─────────────────────────────────────────────────
 // These tests read the .lua files from the examples/ directory relative to the
 // repo root (i.e. the working directory when the test binary is run via ctest
@@ -398,7 +421,7 @@ static void test_example_raymarcher() {
     std::string src = read_file("examples/raymarcher.lua");
     CHECK(!src.empty());
     if (src.empty()) return;
-    std::cout << compile_ok(src, "raymarcher");
+    compile_ok(src, "raymarcher");
 }
 
 static void test_example_voronoi() {
@@ -772,6 +795,7 @@ int main() {
         {"error_type_mismatch", test_error_type_mismatch},
         {"error_concat_rejected", test_error_concat_rejected},
         {"spec_fade_shader",      test_spec_fade_shader},
+        {"spec_alternate_shader", test_spec_alternate_shader},
         {"example_plasma",        test_example_plasma},
         {"example_mandelbrot",    test_example_mandelbrot},
         {"example_raymarcher",    test_example_raymarcher},

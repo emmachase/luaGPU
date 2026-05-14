@@ -75,7 +75,8 @@ target_compile_options(test_compiler PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Werror>
 )
-add_test(NAME compiler_tests COMMAND test_compiler)
+add_test(NAME compiler_tests COMMAND test_compiler
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # ── Tools ──────────────────────────────────────────────────────────────────────
 add_executable(emit_examples tools/emit_examples.cpp)

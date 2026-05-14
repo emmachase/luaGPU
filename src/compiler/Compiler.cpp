@@ -1137,21 +1137,37 @@ TypeInfo Compiler::typecheck_instance(MonoInstance &inst, SymbolTable &base_sym)
     for (auto &[sp, ti] : inst.stmt_types)
         if (ti.is_tvar()) ti = inst.uf.resolve(ti);
 
-    // Find return type from the return statement.
+    // Find return type from any return statement, including those inside
+    // nested if/else, while, for blocks.
     TypeInfo ret = TypeInfo::make(GlslType::Void);
-    for (auto &s : *inst.body) {
-        if (auto *rs = std::get_if<ReturnStmt>(&s->kind)) {
-            if (rs->value) {
-                const Expr *key = rs->value->get();
-                auto it = inst.expr_types.find(key);
-                if (it != inst.expr_types.end()) {
-                    ret = it->second;
-                    if (ret.is_tvar()) ret = inst.uf.resolve(ret);
+
+    std::function<bool(const Block &)> find_return = [&](const Block &blk) -> bool {
+        for (auto &s : blk) {
+            if (auto *rs = std::get_if<ReturnStmt>(&s->kind)) {
+                if (rs->value) {
+                    const Expr *key = rs->value->get();
+                    auto it = inst.expr_types.find(key);
+                    if (it != inst.expr_types.end()) {
+                        ret = it->second;
+                        if (ret.is_tvar()) ret = inst.uf.resolve(ret);
+                        if (!ret.is_unknown()) return true;
+                    }
+                } else {
+                    return true; // void return
                 }
+            } else if (auto *is = std::get_if<IfStmt>(&s->kind)) {
+                for (auto &br : is->branches)
+                    if (find_return(br.body)) return true;
+            } else if (auto *ws = std::get_if<WhileStmt>(&s->kind)) {
+                if (find_return(ws->body)) return true;
+            } else if (auto *fs = std::get_if<ForStmt>(&s->kind)) {
+                if (find_return(fs->body)) return true;
             }
-            break;
         }
-    }
+        return false;
+    };
+
+    find_return(*inst.body);
     return ret;
 }
 
