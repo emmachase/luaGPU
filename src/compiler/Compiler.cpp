@@ -77,7 +77,7 @@ CompileResult Compiler::compile(const ShaderFunc                      &sf,
         base_sym.define(std::move(b));
     };
     inject("uv",           GlslType::Vec2);
-    inject("frag_coord",   GlslType::Vec4);
+    inject("gl_FragCoord", GlslType::Vec4);
     inject("u_resolution", GlslType::Vec2);
     inject("u_time",       GlslType::Float);
     inject("u_delta",      GlslType::Float);
