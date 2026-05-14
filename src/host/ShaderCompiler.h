@@ -37,6 +37,19 @@ int lua_shaderlib(lua_State *L);
 // Register both functions into the global Lua environment.
 void register_shader_functions(lua_State *L);
 
+// ── Host-injected uniforms ────────────────────────────────────────────────────
+// Uniforms that the host guarantees to supply in every GL program (e.g.
+// engine-wide globals like u_rect, u_viewport_scale).  Set once at startup;
+// every subsequent shader() call will make these names available as typed
+// symbols inside Lua shaders and emit the corresponding `uniform <type> <name>;`
+// declarations in the GLSL output.
+//
+//   set_injected_uniforms({{"u_rect", GlslType::Vec4},
+//                          {"u_viewport_scale", GlslType::Vec2}});
+//
+// Pass an empty vector to clear previously registered uniforms.
+void set_injected_uniforms(const std::vector<InjectedUniform> &uniforms);
+
 // ── Path resolver hook ────────────────────────────────────────────────────────
 // Optional callback invoked when extract_source needs to open a file whose
 // path came from debug.getinfo (i.e. a virtual/engine path).  The callback

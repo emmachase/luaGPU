@@ -51,17 +51,26 @@ std::string Emitter::type_str(TypeInfo ti) const {
 // ── Main entry ────────────────────────────────────────────────────────────────
 
 std::string Emitter::emit(
-    const ShaderFunc                  &sf,
-    const std::vector<UniformDesc>    &uniforms,
-    const std::vector<StructDef>      &structs,
-    const std::vector<MonoInstance *> &mono_order,
-    const MonoInstance                &entry)
+    const ShaderFunc                      &sf,
+    const std::vector<UniformDesc>        &uniforms,
+    const std::vector<InjectedUniform>    &injected,
+    const std::vector<StructDef>          &structs,
+    const std::vector<MonoInstance *>     &mono_order,
+    const MonoInstance                    &entry)
 {
     (void)sf;
     mono_order_ = &mono_order;
     structs_    = &structs;
 
-    // 1. User uniforms
+    // 1. Host-injected uniforms (engine-wide globals, no Lua upvalue).
+    if (!injected.empty()) {
+        line("// injected uniforms");
+        for (auto &iu : injected)
+            line("uniform " + std::string(glsl_type_name(iu.type)) + " " + iu.name + ";");
+        line();
+    }
+
+    // 2. User uniforms
     if (!uniforms.empty()) {
         line("// user uniforms");
         for (auto &u : uniforms)

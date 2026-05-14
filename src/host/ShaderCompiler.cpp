@@ -53,6 +53,14 @@ void set_path_resolver(PathResolverFn fn) {
     g_path_resolver = fn;
 }
 
+// ── Host-injected uniforms ────────────────────────────────────────────────────
+
+static std::vector<InjectedUniform> g_injected_uniforms;
+
+void set_injected_uniforms(const std::vector<InjectedUniform> &uniforms) {
+    g_injected_uniforms = uniforms;
+}
+
 // ── extract_source ────────────────────────────────────────────────────────────
 
 bool extract_source(lua_State *L, int fn_idx,
@@ -340,7 +348,7 @@ int lua_shader(lua_State *L) {
 
     // 4. Compile.
     Compiler compiler;
-    CompileResult result = compiler.compile(sf, uniforms, shaderlibs);
+    CompileResult result = compiler.compile(sf, uniforms, shaderlibs, g_injected_uniforms);
 
     if (!result.ok) {
         // Collect all errors into one string.

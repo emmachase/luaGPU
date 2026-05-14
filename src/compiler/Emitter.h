@@ -14,11 +14,12 @@ public:
     // mono_order: callee-before-caller order of helper function instances.
     // entry:      the shader_main instance (already in mono_registry, NOT in mono_order).
     std::string emit(
-        const ShaderFunc                  &sf,
-        const std::vector<UniformDesc>    &uniforms,
-        const std::vector<StructDef>      &structs,
-        const std::vector<MonoInstance *> &mono_order,
-        const MonoInstance                &entry);
+        const ShaderFunc                      &sf,
+        const std::vector<UniformDesc>        &uniforms,
+        const std::vector<InjectedUniform>    &injected,
+        const std::vector<StructDef>          &structs,
+        const std::vector<MonoInstance *>     &mono_order,
+        const MonoInstance                    &entry);
 
 private:
     std::ostringstream out_;

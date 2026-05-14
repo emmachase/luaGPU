@@ -42,6 +42,16 @@ struct UniformDesc {
     int         upvalue_index; // 1-based, as returned by lua_getupvalue
 };
 
+// ── Host-injected uniform ──────────────────────────────────────────────────────
+// Uniforms that the host guarantees will be present in the GL program (e.g.
+// engine-wide globals like u_rect, u_viewport_scale).  They are made available
+// as typed names inside Lua shaders and emitted as `uniform <type> <name>;`
+// declarations in the GLSL output, but they are NOT driven by Lua upvalues.
+struct InjectedUniform {
+    std::string name;
+    GlslType    type;
+};
+
 // ── Shaderlib descriptor ───────────────────────────────────────────────────────
 // Describes a shaderlib whose functions can be called from the shader.
 // The compiler parses src_text, collects exported functions, and monomorphizes
@@ -108,15 +118,17 @@ struct CompileResult {
 // ── Compiler ──────────────────────────────────────────────────────────────────
 class Compiler {
 public:
-    CompileResult compile(const ShaderFunc               &sf,
-                          const std::vector<UniformDesc>  &uniforms,
-                          const std::vector<ShaderLibDesc> &shaderlibs = {});
+    CompileResult compile(const ShaderFunc                      &sf,
+                          const std::vector<UniformDesc>         &uniforms,
+                          const std::vector<ShaderLibDesc>       &shaderlibs = {},
+                          const std::vector<InjectedUniform>     &injected   = {});
 
 private:
     // ── persistent compiler state ──────────────────────────────────────────
     const ShaderFunc        *sf_          = nullptr;
-    std::vector<UniformDesc>  uniforms_;
-    std::vector<ShaderLibDesc> shaderlibs_;
+    std::vector<UniformDesc>       uniforms_;
+    std::vector<InjectedUniform>   injected_uniforms_;
+    std::vector<ShaderLibDesc>     shaderlibs_;
     bool                     had_errors_  = false;
 
     // Parsed shaderlib ASTs (owned; indexed in parallel with shaderlibs_).

@@ -34,12 +34,14 @@ const Compiler::FuncSig *Compiler::find_sig(const std::string &name,
 // Top-level entry
 // ───────────────────────────────────────────────────────────────────────────────
 
-CompileResult Compiler::compile(const ShaderFunc               &sf,
-                                 const std::vector<UniformDesc>  &uniforms,
-                                 const std::vector<ShaderLibDesc> &shaderlibs) {
-    sf_         = &sf;
-    uniforms_   = uniforms;
-    shaderlibs_ = shaderlibs;
+CompileResult Compiler::compile(const ShaderFunc                      &sf,
+                                 const std::vector<UniformDesc>         &uniforms,
+                                 const std::vector<ShaderLibDesc>       &shaderlibs,
+                                 const std::vector<InjectedUniform>     &injected) {
+    sf_                = &sf;
+    uniforms_          = uniforms;
+    shaderlibs_        = shaderlibs;
+    injected_uniforms_ = injected;
 
     // ── Parse and register shaderlibs ─────────────────────────────────────
     // Each shaderlib is a closure whose body contains local function declarations
@@ -80,6 +82,13 @@ CompileResult Compiler::compile(const ShaderFunc               &sf,
     inject("u_time",       GlslType::Float);
     inject("u_delta",      GlslType::Float);
     inject("u_mouse",      GlslType::Vec2);
+
+    // Host-injected uniforms (engine-wide globals with no Lua upvalue).
+    for (auto &iu : injected_uniforms_) {
+        Binding b; b.name = iu.name; b.kind = BindingKind::Uniform;
+        b.type = TypeInfo::make(iu.type);
+        base_sym.define(std::move(b));
+    }
 
     for (auto &u : uniforms_) {
         Binding b; b.name = u.name; b.kind = BindingKind::Uniform;
@@ -184,7 +193,7 @@ CompileResult Compiler::compile(const ShaderFunc               &sf,
 
         // Emit
         Emitter emitter;
-        std::string glsl = emitter.emit(sf, uniforms_, structs_, mono_order_,
+        std::string glsl = emitter.emit(sf, uniforms_, injected_uniforms_, structs_, mono_order_,
                                         *entry_ptr);
         CompileResult r;
         r.ok       = !had_errors_;
